@@ -87,5 +87,4 @@ private:
 
 };
 
-
 EOSMGMNAMESPACE_END

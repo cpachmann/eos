@@ -27,8 +27,6 @@
 #include "console/ConsoleMain.hh"
 #include "console/commands/ICmdHelper.hh"
 
-//extern int com_io(char*);  // #TOCK
-
 int com_io_help();
 
 //------------------------------------------------------------------------------

@@ -167,7 +167,6 @@ ICmdHelper::GetError()
   return mMgmExec.GetError();
 }
 
-
 bool
 ICmdHelper::next_token(eos::common::StringTokenizer& tokenizer,
                        std::string& token)
