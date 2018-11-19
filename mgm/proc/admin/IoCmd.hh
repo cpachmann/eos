@@ -1,5 +1,5 @@
-//------------------------------------------------------------------------------
-//! @file ICmdHelper.hh
+// File: IoCmd.hh
+// Author: Fabio Luchetti - CERN
 //------------------------------------------------------------------------------
 
 /************************************************************************
@@ -21,102 +21,92 @@
  ************************************************************************/
 
 #pragma once
-#include "proto/ConsoleRequest.pb.h"
-#include "console/MgmExecute.hh"
-#include "common/StringTokenizer.hh"
+#include "mgm/Namespace.hh"
+#include "proto/Io.pb.h"
+#include "mgm/proc/ProcCommand.hh"
+
+EOSMGMNAMESPACE_BEGIN
 
 //------------------------------------------------------------------------------
-//! Class ICmdHelper
-//! @brief Abstract base class to be inherited in all the command
-//! implementations
+//! Class IoCmd - class handling io commands
 //------------------------------------------------------------------------------
-class ICmdHelper
+class IoCmd: public IProcCommand
 {
 public:
   //----------------------------------------------------------------------------
   //! Constructor
+  //!
+  //! @param req client ProtocolBuffer request
+  //! @param vid client virtual identity
   //----------------------------------------------------------------------------
-  ICmdHelper():
-    mReq(), mMgmExec(), mIsAdmin(false), mHighlight(false), mIsSilent(false)
-  {
-    if (json) {
-      mReq.set_format(eos::console::RequestProto::JSON);
-    }
-
-    if (global_comment.length()) {
-      mReq.set_comment(global_comment.c_str());
-      global_comment = "";
-    }
-  }
+  explicit IoCmd(eos::console::RequestProto&& req,
+                 eos::common::Mapping::VirtualIdentity& vid):
+    IProcCommand(std::move(req), vid, false)
+  {}
 
   //----------------------------------------------------------------------------
   //! Destructor
   //----------------------------------------------------------------------------
-  virtual ~ICmdHelper() = default;
+  virtual ~IoCmd() = default;
 
   //----------------------------------------------------------------------------
-  //! Parse command line input
+  //! Method implementing the specific behaviour of the command executed by the
+  //! asynchronous thread
+  //----------------------------------------------------------------------------
+  eos::console::ReplyProto ProcessRequest() noexcept override;
+
+private:
+
+  //----------------------------------------------------------------------------
+  //! Execute stat subcommand
   //!
-  //! @param arg input
+  //! @param stat stat subcommand proto object
+  //! @param reply reply proto object
+  //----------------------------------------------------------------------------
+  int StatSubcmd(const eos::console::IoProto_StatProto& stat,
+                 eos::console::ReplyProto& reply);
+
+  //----------------------------------------------------------------------------
+  //! Execute enable subcommand
   //!
-  //! @return true if successful, otherwise false
+  //! @param enable enable subcommand proto object
+  //! @param reply reply proto object
   //----------------------------------------------------------------------------
-  virtual bool ParseCommand(const char* arg) = 0;
-
-  bool next_token(eos::common::StringTokenizer& tokenizer, std::string& token);
+  int EnableSubcmd(const eos::console::IoProto_EnableProto& enable,
+                   eos::console::ReplyProto& reply);
 
   //----------------------------------------------------------------------------
-  //! Execute command and display any output information
-  //! @note When this methods is called the generic request object mReq needs
-  //! to already contain the specific commands object.
+  //! Execute stat subcommand
   //!
-  //! @return command return code
+  //! @param disable disable subcommand proto object
+  //! @param reply reply proto object
   //----------------------------------------------------------------------------
-  int Execute(bool printError = true);
+  int DisableSubcmd(const eos::console::IoProto_DisableProto& disable,
+                    eos::console::ReplyProto& reply);
 
   //----------------------------------------------------------------------------
-  //! Execute command without displaying the result
+  //! Execute stat subcommand
   //!
-  //! @return command return code
+  //! @param report report subcommand proto object
+  //! @param reply reply proto object
   //----------------------------------------------------------------------------
-  int ExecuteWithoutPrint();
+  int ReportSubcmd(const eos::console::IoProto_ReportProto& report,
+                   eos::console::ReplyProto& reply);
 
   //----------------------------------------------------------------------------
-  //! Get command output string
-  //----------------------------------------------------------------------------
-  std::string GetResult();
-
-  //----------------------------------------------------------------------------
-  //! Get command error string
-  //----------------------------------------------------------------------------
-  std::string GetError();
-
-  inline bool NeedsConfirmation()
-  {
-    return mNeedsConfirmation;
-  }
-
-  //------------------------------------------------------------------------------
-  //! Method used for user confirmation of the specified command
+  //! Execute stat subcommand
   //!
-  //! @return true if operation confirmed, otherwise false
-  //------------------------------------------------------------------------------
-  bool ConfirmOperation();
-
-
-protected:
+  //! @param ns ns subcommand proto object
+  //! @param reply reply proto object
   //----------------------------------------------------------------------------
-  //! Apply highlighting to text
-  //!
-  //! @param text text to be highlighted
-  //----------------------------------------------------------------------------
-  void TextHighlight(std::string& text);
+  int NsSubcmd(const eos::console::IoProto_NsProto& ns,
+               eos::console::ReplyProto& reply);
 
-  eos::console::RequestProto mReq; ///< Generic request object send to the MGM
-  MgmExecute mMgmExec; ///< Wrapper for executing commands at the MGM
-  bool mIsAdmin; ///< If true execute as admin, otherwise as user
-  bool mHighlight; ///< If true apply text highlighting to output
-  bool mIsSilent; ///< If true execute command but don't display anything
-  //! If true it requires a strong user confirmation before executing the command
-  bool mNeedsConfirmation {false};
+
+
+
 };
+
+
+
+EOSMGMNAMESPACE_END
