@@ -1724,7 +1724,6 @@ Iostat::PrintNs(XrdOucString& out, XrdOucString option)
   }
 }
 
-
 void
 Iostat::PrintNs(std::string& out, std::string option)
 {
