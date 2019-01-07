@@ -10,7 +10,7 @@
  * This program is free software: you can redistribute it and/or modify *
  * it under the terms of the GNU General Public License as published by *
  * the Free Software Foundation, either version 3 of the License, or    *
- * (at your token) any later version.                                  *
+ * (at your token) any later version.                                   *
  *                                                                      *
  * This program is distributed in the hope that it will be useful,      *
  * but WITHOUT ANY WARRANTY; without even the implied warranty of       *
@@ -27,9 +27,7 @@
 #include "console/ConsoleMain.hh"
 #include "console/commands/ICmdHelper.hh"
 
-//extern int com_group(char *); // #TOCK
-
-int com_group_help();
+void com_group_help();
 
 //------------------------------------------------------------------------------
 //! Class GroupHelper
@@ -45,6 +43,7 @@ public:
     mIsSilent = false;
     mHighlight = true;
   }
+
   //----------------------------------------------------------------------------
   //! Destructor
   //----------------------------------------------------------------------------
@@ -58,10 +57,11 @@ public:
   //! @return true if successful, otherwise false
   //----------------------------------------------------------------------------
   bool ParseCommand(const char* arg) override;
-
 };
 
-
+//------------------------------------------------------------------------------
+// Parse command line input
+//------------------------------------------------------------------------------
 bool GroupHelper::ParseCommand(const char* arg)
 {
   eos::console::GroupProto* group = mReq.mutable_group();
@@ -73,7 +73,7 @@ bool GroupHelper::ParseCommand(const char* arg)
     return false;
   }
 
-  /* one of { ls, rm, set } */
+  // one of { ls, rm, set }
   if (token == "ls") {
     eos::console::GroupProto_LsProto* ls = group->mutable_ls();
 
@@ -82,6 +82,7 @@ bool GroupHelper::ParseCommand(const char* arg)
         mIsSilent = true;
       } else if (token == "-g") {
         if (!next_token(tokenizer, token) || !tokenizer.IsUnsignedNumber(token)) {
+          // @todo(faluchet): use C++ :) std::cerr/std::cout
           fprintf(stderr,
                   "Error: geodepth was not provided or it does not have the correct value: geodepth should be a positive integer\n");
           return false;
@@ -90,6 +91,7 @@ bool GroupHelper::ParseCommand(const char* arg)
         ls->set_outdepth(std::stoi(token));
       } else if (token == "-b" || token == "--brief") {
         ls->set_outhost(true);
+        // @todo(faluchet) is this comment still needed ?
         // } else if (token == "-m" || token == "-l" || token == "--io" || token == "--IO") {
       } else if (token == "-m") {
         ls->set_outformat(eos::console::GroupProto_LsProto::MONITORING);
@@ -138,7 +140,6 @@ bool GroupHelper::ParseCommand(const char* arg)
   return true;
 }
 
-
 //------------------------------------------------------------------------------
 // Group command entry point
 //------------------------------------------------------------------------------
@@ -162,7 +163,10 @@ int com_protogroup(char* arg)
   return global_retc;
 }
 
-int com_group_help()
+//------------------------------------------------------------------------------
+// Print help message
+//------------------------------------------------------------------------------
+void com_group_help()
 {
   std::ostringstream oss;
   oss
@@ -190,6 +194,4 @@ int com_group_help()
       << std::endl
       << std::endl;
   std::cerr << oss.str() << std::endl;
-  global_retc = EINVAL;
-  return (0);
 }

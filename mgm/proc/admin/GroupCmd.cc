@@ -5,7 +5,7 @@
 
 /************************************************************************
  * EOS - the CERN Disk Storage System                                   *
- * Copyright (C) 2017 CERN/Switzerland                                  *
+ * Copyright (C) 2018 CERN/Switzerland                                  *
  *                                                                      *
  * This program is free software: you can redistribute it and/or modify *
  * it under the terms of the GNU General Public License as published by *
@@ -132,15 +132,17 @@ GroupCmd::RmSubcmd(const eos::console::GroupProto_RmProto& rm,
         retc = ENOENT;
       } else {
         for (auto it = FsView::gFsView.mGroupView[rm.group()]->begin();
-             it != FsView::gFsView.mGroupView[rm.group()]->end(); it++) {
+             it != FsView::gFsView.mGroupView[rm.group()]->end(); ++it) {
           if (FsView::gFsView.mIdView.count(*it)) {
             FileSystem* fs = FsView::gFsView.mIdView[*it];
 
             if (fs) {
-              // check that all filesystems are empty
+              // Check that all filesystems are empty
               if ((fs->GetConfigStatus(false) != eos::common::FileSystem::kEmpty)) {
                 reply.set_std_err("error: unable to remove group '" + rm.group() +
-                                  "' - filesystems are not all in empty state - try list the group and drain them or set: fs config <fsid> configstatus=empty\n");
+                                  "' - filesystems are not all in empty state - "
+                                  "try list the group and drain them or set: fs "
+                                  "config <fsid> configstatus=empty\n");
                 reply.set_retc(EBUSY);
                 return SFS_OK;
               }
@@ -221,7 +223,7 @@ GroupCmd::SetSubcmd(const eos::console::GroupProto_SetProto& set,
 
           if (FsView::gFsView.mGroupView.count(set.group())) {
             for (auto git = FsView::gFsView.mGroupView[set.group()]->begin();
-                 git != FsView::gFsView.mGroupView[set.group()]->end(); git++) {
+                 git != FsView::gFsView.mGroupView[set.group()]->end(); ++git) {
               if (FsView::gFsView.mIdView.count(*git)) {
                 int drainstatus = (eos::common::FileSystem::GetDrainStatusFromString(
                                      FsView::gFsView.mIdView[*git]->GetString("drainstatus").c_str()));
@@ -236,7 +238,7 @@ GroupCmd::SetSubcmd(const eos::console::GroupProto_SetProto& set,
             }
 
             for (auto git = FsView::gFsView.mGroupView[set.group()]->begin();
-                 git != FsView::gFsView.mGroupView[set.group()]->end(); git++) {
+                 git != FsView::gFsView.mGroupView[set.group()]->end(); ++git) {
               fs = FsView::gFsView.mIdView[*git];
 
               if (fs) {
@@ -260,7 +262,7 @@ GroupCmd::SetSubcmd(const eos::console::GroupProto_SetProto& set,
 
           if (FsView::gFsView.mGroupView.count(set.group())) {
             for (auto git = FsView::gFsView.mGroupView[set.group()]->begin();
-                 git != FsView::gFsView.mGroupView[set.group()]->end(); git++) {
+                 git != FsView::gFsView.mGroupView[set.group()]->end(); ++git) {
               fs = FsView::gFsView.mIdView[*git];
 
               if (fs) {

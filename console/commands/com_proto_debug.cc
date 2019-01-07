@@ -1,11 +1,11 @@
-// ----------------------------------------------------------------------
+//------------------------------------------------------------------------------
 // File: com_proto_debug.cc
 // Author: Fabio Luchetti - CERN
-// ----------------------------------------------------------------------
+//------------------------------------------------------------------------------
 
 /************************************************************************
  * EOS - the CERN Disk Storage System                                   *
- * Copyright (C) 2011 CERN/Switzerland                                  *
+ * Copyright (C) 2018 CERN/Switzerland                                  *
  *                                                                      *
  * This program is free software: you can redistribute it and/or modify *
  * it under the terms of the GNU General Public License as published by *
@@ -21,18 +21,12 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.*
  ************************************************************************/
 
-/*----------------------------------------------------------------------------*/
 #include "common/StringTokenizer.hh"
 #include "common/Logging.hh"
 #include "console/ConsoleMain.hh"
 #include "console/commands/ICmdHelper.hh"
 
-/*----------------------------------------------------------------------------*/
-
-
-//extern int com_debug(char*);  // #TOCK
-
-int com_debug_help();
+void com_debug_help();
 
 
 //------------------------------------------------------------------------------
@@ -44,8 +38,7 @@ public:
   //----------------------------------------------------------------------------
   //! Constructor
   //----------------------------------------------------------------------------
-  DebugHelper()
-  {  }
+  DebugHelper() = default;
 
   //----------------------------------------------------------------------------
   //! Destructor
@@ -63,6 +56,9 @@ public:
 };
 
 
+//------------------------------------------------------------------------------
+// Parse command line input
+//------------------------------------------------------------------------------
 bool DebugHelper::ParseCommand(const char* arg)
 {
   eos::console::DebugProto* debugp = mReq.mutable_debug();
@@ -70,14 +66,11 @@ bool DebugHelper::ParseCommand(const char* arg)
   tokenizer.GetLine();
   std::string token;
 
-  // std::string level;
-  // std::string nodequeue;
-  // std::string filterlist;
-
   if (!next_token(tokenizer, token)) {
     return false;
   }
 
+  // @todo(faluchet): isn't this already dealt with in wants_help() ?!
   // #TODO the whole if-tree should be simplified
   if ((token == "-h") || (token == "--help")) {
     return false;
@@ -130,8 +123,9 @@ bool DebugHelper::ParseCommand(const char* arg)
   return true;
 }
 
-
-/* Debug Level Setting */
+//------------------------------------------------------------------------------
+// Debug CLI
+//------------------------------------------------------------------------------
 int
 com_protodebug(char* arg)
 {
@@ -153,17 +147,22 @@ com_protodebug(char* arg)
   return global_retc;
 }
 
-int com_debug_help()
+//------------------------------------------------------------------------------
+// Print help message
+//------------------------------------------------------------------------------
+void com_debug_help()
 {
   std::ostringstream oss;
+  // @todo(faluchet): this needs to be reformatted with 2 spaces as intdentation
+  // margin in the final display
   oss
-      << "usage: debug this|<level> [node-queue] [--filter <unitlist>]"
+      << "Usage: debug this|<level> [node-queue] [--filter <unitlist>]"
       << std::endl
       << "'[eos] debug ...' allows to modify the verbosity of the EOS log files in MGM and FST services."
       << std::endl
       << std::endl
       << "Options" << std::endl
-      << "debug  this :" << std::endl
+      << "debug this :" << std::endl
       << "                                                  toggle EOS shell debug mode"
       << std::endl
       << "debug  <level> [--filter <unitlist>] :" << std::endl
@@ -196,6 +195,4 @@ int com_debug_help()
       << std::endl
       << std::endl;
   std::cerr << oss.str() << std::endl;
-  global_retc = EINVAL;
-  return (0);
 }

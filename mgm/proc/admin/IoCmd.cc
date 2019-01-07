@@ -5,7 +5,7 @@
 
 /************************************************************************
  * EOS - the CERN Disk Storage System                                   *
- * Copyright (C) 2017 CERN/Switzerland                                  *
+ * Copyright (C) 2018 CERN/Switzerland                                  *
  *                                                                      *
  * This program is free software: you can redistribute it and/or modify *
  * it under the terms of the GNU General Public License as published by *
@@ -69,11 +69,15 @@ IoCmd::ProcessRequest() noexcept
   return reply;
 }
 
+//------------------------------------------------------------------------------
+// Execute stat subcommand
+//------------------------------------------------------------------------------
 int IoCmd::StatSubcmd(const eos::console::IoProto_StatProto& stat,
                       eos::console::ReplyProto& reply)
 {
   // If nothing is selected, we show the summary information
   if (!(stat.apps() | stat.domain() | stat.top() | stat.details())) {
+    // @todo(faluchet): i think summary is not used at all. Is it still needed?
     //stat.set_summary(true);
     eos_static_info("io stat");
     gOFS->IoStats->PrintOut(stdOut, true, stat.details(), stat.monitoring(),
@@ -86,9 +90,15 @@ int IoCmd::StatSubcmd(const eos::console::IoProto_StatProto& stat,
                             stat.top(), stat.domain(), stat.apps());
   }
 
+  // @todo(faluchet): to answer your question. In this particular case it's not needed.
+  // It all depends on you if you need to pass the return code further down. The same
+  // also applies for the rest of the subcommands.
   return SFS_OK; //TOCK is this needed?
 }
 
+//------------------------------------------------------------------------------
+// Execute enable subcommand
+//------------------------------------------------------------------------------
 int IoCmd::EnableSubcmd(const eos::console::IoProto_EnableProto& enable,
                         eos::console::ReplyProto& reply)
 {
@@ -103,7 +113,9 @@ int IoCmd::EnableSubcmd(const eos::console::IoProto_EnableProto& enable,
       }
     } else {
       if (enable.popularity()) {
-        gOFS->IoStats->Start(); // always enable collection otherwise we don't get anything for popularity reporting
+        // Always enable collection otherwise we don't get anything for
+        // popularity reporting
+        gOFS->IoStats->Start();
 
         if (gOFS->IoStats->StartPopularity()) {
           stdOut += "success: enabled IO popularity collection";
@@ -143,6 +155,9 @@ int IoCmd::EnableSubcmd(const eos::console::IoProto_EnableProto& enable,
   return SFS_OK;
 }
 
+//------------------------------------------------------------------------------
+// Execute disable subcommand
+//------------------------------------------------------------------------------
 int IoCmd::DisableSubcmd(const eos::console::IoProto_DisableProto& disable,
                          eos::console::ReplyProto& reply)
 {
@@ -195,6 +210,9 @@ int IoCmd::DisableSubcmd(const eos::console::IoProto_DisableProto& disable,
   return SFS_OK;
 }
 
+//------------------------------------------------------------------------------
+// Execute report subcommand
+//------------------------------------------------------------------------------
 int IoCmd::ReportSubcmd(const eos::console::IoProto_ReportProto& report,
                         eos::console::ReplyProto& reply)
 {
@@ -205,6 +223,9 @@ int IoCmd::ReportSubcmd(const eos::console::IoProto_ReportProto& report,
   return retc;
 }
 
+//------------------------------------------------------------------------------
+// Execute ns subcommand
+//------------------------------------------------------------------------------
 int IoCmd::NsSubcmd(const eos::console::IoProto_NsProto& ns,
                     eos::console::ReplyProto& reply)
 {

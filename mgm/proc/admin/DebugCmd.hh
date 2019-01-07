@@ -1,10 +1,11 @@
+//------------------------------------------------------------------------------
 // File: DebugCmd.hh
 // Author: Fabio Luchetti - CERN
 //------------------------------------------------------------------------------
 
 /************************************************************************
  * EOS - the CERN Disk Storage System                                   *
- * Copyright (C) 2017 CERN/Switzerland                                  *
+ * Copyright (C) 2018 CERN/Switzerland                                  *
  *                                                                      *
  * This program is free software: you can redistribute it and/or modify *
  * it under the terms of the GNU General Public License as published by *
@@ -20,12 +21,10 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.*
  ************************************************************************/
 
-// #TOCK taken from IoCmd.hh
 #pragma once
 #include "mgm/Namespace.hh"
 #include "proto/Debug.pb.h"
 #include "mgm/proc/ProcCommand.hh"
-
 
 EOSMGMNAMESPACE_BEGIN
 
@@ -58,7 +57,6 @@ public:
   eos::console::ReplyProto ProcessRequest() noexcept override;
 
 private:
-
   //----------------------------------------------------------------------------
   //! Execute get subcommand
   //!
@@ -76,8 +74,6 @@ private:
   //----------------------------------------------------------------------------
   int SetSubcmd(const eos::console::DebugProto_SetProto& set,
                 eos::console::ReplyProto& reply);
-
 };
-
 
 EOSMGMNAMESPACE_END

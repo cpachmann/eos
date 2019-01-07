@@ -1,10 +1,11 @@
+//------------------------------------------------------------------------------
 // File: IoCmd.hh
 // Author: Fabio Luchetti - CERN
 //------------------------------------------------------------------------------
 
 /************************************************************************
  * EOS - the CERN Disk Storage System                                   *
- * Copyright (C) 2017 CERN/Switzerland                                  *
+ * Copyright (C) 2018 CERN/Switzerland                                  *
  *                                                                      *
  * This program is free software: you can redistribute it and/or modify *
  * it under the terms of the GNU General Public License as published by *
@@ -56,7 +57,6 @@ public:
   eos::console::ReplyProto ProcessRequest() noexcept override;
 
 private:
-
   //----------------------------------------------------------------------------
   //! Execute stat subcommand
   //!
@@ -101,12 +101,6 @@ private:
   //----------------------------------------------------------------------------
   int NsSubcmd(const eos::console::IoProto_NsProto& ns,
                eos::console::ReplyProto& reply);
-
-
-
-
 };
-
-
 
 EOSMGMNAMESPACE_END
