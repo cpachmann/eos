@@ -96,10 +96,10 @@ public:
   //! @param escapeand if true escape & with #AND# !! UGLY!!
   //!
   //! @return next token or a void string "" if no token found
+  //!
+  //! @todo will substitute GetToken when all commands use protobuf
   //----------------------------------------------------------------------------
-  std::string GetSToken(bool escapeand =
-                          true); // #TODO will substitute GetToken when all commands use protobuf
-
+  std::string GetSToken(bool escapeand = true);
 
   //----------------------------------------------------------------------------
   //! Split given string based on the delimiter

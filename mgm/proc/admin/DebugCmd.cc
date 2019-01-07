@@ -1,11 +1,11 @@
-// ----------------------------------------------------------------------
-// File: proc/admin/Debug.cc
-// Author: Andreas-Joachim Peters - CERN
-// ----------------------------------------------------------------------
+//------------------------------------------------------------------------------
+// File: DebugCmd.cc
+// Author: Fabio Luchetti - CERN
+//------------------------------------------------------------------------------
 
 /************************************************************************
  * EOS - the CERN Disk Storage System                                   *
- * Copyright (C) 2011 CERN/Switzerland                                  *
+ * Copyright (C) 2018 CERN/Switzerland                                  *
  *                                                                      *
  * This program is free software: you can redistribute it and/or modify *
  * it under the terms of the GNU General Public License as published by *
@@ -25,12 +25,9 @@
 #include "mgm/proc/ProcInterface.hh"
 #include "mgm/XrdMgmOfs.hh"
 #include "mgm/Messaging.hh"
-
 #include "mgm/FsView.hh"
 
-
 EOSMGMNAMESPACE_BEGIN
-
 
 //------------------------------------------------------------------------------
 // Method implementing the specific behavior of the command executed by the
@@ -60,13 +57,13 @@ DebugCmd::ProcessRequest() noexcept
   return reply;
 }
 
-//----------------------------------------------------------------------------
+//------------------------------------------------------------------------------
 // Execute get subcommand
-//----------------------------------------------------------------------------
+//------------------------------------------------------------------------------
 int DebugCmd::GetSubcmd(const eos::console::DebugProto_GetProto& get,
                         eos::console::ReplyProto& reply)
 {
-  /* get current loglevel of ?: "something" is missing */ // #TODO
+  // get current loglevel of ?: "something" is missing */ // #TODO
   eos::common::Logging& g_logging = eos::common::Logging::GetInstance();
   stdOut = (std::string("The current loglevel is: ") +
             g_logging.GetPriorityString(g_logging.GetLogMask())).c_str();  // #TOCK
@@ -76,6 +73,10 @@ int DebugCmd::GetSubcmd(const eos::console::DebugProto_GetProto& get,
   return SFS_OK;
 }
 
+//------------------------------------------------------------------------------
+// @todo(faluchet): add a comment on why you need this function and what is
+// doing
+//------------------------------------------------------------------------------
 std::string rebuild_pOpaque(const eos::console::DebugProto_SetProto& set)
 {
   std::string in = "mgm.cmd=debug";
@@ -95,9 +96,9 @@ std::string rebuild_pOpaque(const eos::console::DebugProto_SetProto& set)
   return in;
 }
 
-//----------------------------------------------------------------------------
+//------------------------------------------------------------------------------
 // Execute set subcommand
-//----------------------------------------------------------------------------
+//------------------------------------------------------------------------------
 int DebugCmd::SetSubcmd(const eos::console::DebugProto_SetProto& set,
                         eos::console::ReplyProto& reply)
 {
@@ -106,10 +107,11 @@ int DebugCmd::SetSubcmd(const eos::console::DebugProto_SetProto& set,
     retc = EPERM;
   } else {
     XrdMqMessage message("debug");
+    // @todo(faluchet): do you still need this commented part?
     // int envlen; //
     // std::string body = pOpaque->Env(envlen); //
     std::string body;
-    int envlen;
+    //int envlen;
     // filter out several *'s ...
     int nstars = 0;
     int npos = 0;
@@ -124,7 +126,7 @@ int DebugCmd::SetSubcmd(const eos::console::DebugProto_SetProto& set,
       retc = EINVAL;
     } else {
       body = rebuild_pOpaque(set);
-      envlen = body.length();
+      //envlen = body.length();
       message.SetBody(body.c_str());
       eos::common::Logging& g_logging = eos::common::Logging::GetInstance();
       // always check debug level exists first
@@ -211,6 +213,5 @@ int DebugCmd::SetSubcmd(const eos::console::DebugProto_SetProto& set,
   reply.set_retc(retc);
   return SFS_OK;
 }
-
 
 EOSMGMNAMESPACE_END
