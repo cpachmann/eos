@@ -29,6 +29,9 @@
 #include "mgm/proc/admin/FsCmd.hh"
 #include "mgm/proc/admin/NsCmd.hh"
 #include "mgm/proc/admin/StagerRmCmd.hh"
+#include "mgm/proc/admin/GroupCmd.hh"
+#include "mgm/proc/admin/IoCmd.hh"
+#include "mgm/proc/admin/DebugCmd.hh"
 #include <google/protobuf/util/json_util.h>
 
 EOSMGMNAMESPACE_BEGIN
@@ -206,6 +209,18 @@ ProcInterface::HandleProtobufRequest(const char* path, const char* opaque,
 
   case RequestProto::kRecycle:
     cmd.reset(new RecycleCmd(std::move(req), vid));
+    break;
+
+  case RequestProto::kGroup:
+    cmd.reset(new GroupCmd(std::move(req), vid));
+    break;
+
+  case RequestProto::kIo:
+    cmd.reset(new IoCmd(std::move(req), vid));
+    break;
+
+  case RequestProto::kDebug:
+    cmd.reset(new DebugCmd(std::move(req), vid));
     break;
 
   default:

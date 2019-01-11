@@ -14,17 +14,11 @@ message IoProto {
   }
 
   message EnableProto {
-    bool reports        = 1;
-    bool popularity     = 2;
-    bool namespacex     = 3;
-    string upd_address  = 4;
-  }
-  // messages EnableProto && DisableProto works the same way #TODO merge them
-  message DisableProto {
-    bool reports        = 1;
-    bool popularity     = 2;
-    bool namespacex      = 3;
-    string upd_address  = 4;
+    bool switchh         = 1; // enable or disable
+    bool reports        = 2;
+    bool popularity     = 3;
+    bool namespacex     = 4;
+    string upd_address  = 5;
   }
 
   message ReportProto {
@@ -50,9 +44,8 @@ message IoProto {
   oneof subcmd {
     StatProto stat        = 1;
     EnableProto enable    = 2;
-    DisableProto disable  = 3;
-    ReportProto report    = 4;
-    NsProto ns            = 5;
+    ReportProto report    = 3;
+    NsProto ns            = 4;
   }
 
 }

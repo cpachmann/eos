@@ -130,8 +130,10 @@ bool IoHelper::ParseCommand(const char* arg)
 
     eos::console::IoProto_ReportProto* report = io->mutable_report();
     report->set_path(token);
-  } else if (token == "enable") {
+  } else if (token == "enable" || token == "disable") {
     eos::console::IoProto_EnableProto* enable = io->mutable_enable();
+    (token == "enable") ? (enable->set_switchh(true)) : (enable->set_switchh(
+          false));
 
     while (next_token(tokenizer, token)) {
       if (token == "-r") {
@@ -145,27 +147,6 @@ bool IoHelper::ParseCommand(const char* arg)
           return false;
         } else {
           enable->set_upd_address(token);
-        }
-      } else {
-        return false;
-      }
-    }
-  } else if (token == "disable") { // #TODO merge with enable
-    // @todo(faluchet): yes, please merge it with enable!
-    eos::console::IoProto_DisableProto* disable = io->mutable_disable();
-
-    while (next_token(tokenizer, token)) {
-      if (token == "-r") {
-        disable->set_reports(true);
-      } else if (token == "-p") {
-        disable->set_popularity(true);
-      } else if (token == "-n") {
-        disable->set_namespacex(true);
-      } else if (token == "--udp") {
-        if (!next_token(tokenizer, token) || (token.find("-") == 0)) {
-          return false;
-        } else {
-          disable->set_upd_address(token);
         }
       } else {
         return false;

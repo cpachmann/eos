@@ -85,7 +85,7 @@ private:
                     eos::console::ReplyProto& reply);
 
   //----------------------------------------------------------------------------
-  //! Execute stat subcommand
+  //! Execute report subcommand
   //!
   //! @param report report subcommand proto object
   //! @param reply reply proto object
@@ -94,7 +94,7 @@ private:
                    eos::console::ReplyProto& reply);
 
   //----------------------------------------------------------------------------
-  //! Execute stat subcommand
+  //! Execute ns subcommand
   //!
   //! @param ns ns subcommand proto object
   //! @param reply reply proto object
