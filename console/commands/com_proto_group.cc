@@ -96,7 +96,7 @@ bool GroupHelper::ParseCommand(const char* arg)
       } else if (token == "-m") {
         ls->set_outformat(eos::console::GroupProto_LsProto::MONITORING);
       } else if (token == "-l") {
-        ls->set_outformat(eos::console::GroupProto_LsProto::LONGER);
+        ls->set_outformat(eos::console::GroupProto_LsProto::LISTING);
       } else if (token == "--io") {
         ls->set_outformat(eos::console::GroupProto_LsProto::IOGROUP);
       } else if (token == "--IO") {

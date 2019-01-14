@@ -148,47 +148,10 @@ int IoCmd::EnableSubcmd(const eos::console::IoProto_EnableProto& enable,
       }
     }
   } else {
-    if (enable.reports()) {
-      if (gOFS->IoStats->StartReport()) {
-        stdOut += "success: enabled IO report store";
-      } else {
-        stdErr += "error: IO report store already enabled";
-        retc = EINVAL;
-      }
-    }
-
-    if (enable.namespacex()) {
-      if (gOFS->IoStats->StartReportNamespace()) {
-        stdOut += "success: enabled IO report namespace";
-      } else {
-        stdErr += "error: IO report namespace already enabled";
-        retc = EINVAL;
-      }
-    }
-  }
-
-  return SFS_OK;
-}
-
-//------------------------------------------------------------------------------
-// Execute disable subcommand
-//------------------------------------------------------------------------------
-int IoCmd::DisableSubcmd(const eos::console::IoProto_DisableProto& disable,
-                         eos::console::ReplyProto& reply)
-{
-  if ((!disable.reports()) && (!disable.namespacex())) {
-    if (disable.upd_address().length()) {
-      if (gOFS->IoStats->RemoveUdpTarget(disable.upd_address().c_str())) {
-        stdOut += ("success: disabled IO udp target " + disable.upd_address()).c_str();
-      } else {
-        stdErr += ("error: IO udp target was not configured " +
-                   disable.upd_address()).c_str();
-        retc = EINVAL;
-      }
-    } else {
-      if (disable.popularity()) {
-        if (gOFS->IoStats->StopPopularity()) {
-          stdOut += "success: disabled IO popularity collection";
+    if ((!enable.reports()) && (!enable.namespacex())) {
+      if (enable.upd_address().length()) {
+        if (gOFS->IoStats->RemoveUdpTarget(enable.upd_address().c_str())) {
+          stdOut += ("success: disabled IO udp target " + enable.upd_address()).c_str();
         } else {
           stdErr += ("error: IO udp target was not configured " +
                      enable.upd_address()).c_str();

@@ -76,15 +76,6 @@ private:
                    eos::console::ReplyProto& reply);
 
   //----------------------------------------------------------------------------
-  //! Execute stat subcommand
-  //!
-  //! @param disable disable subcommand proto object
-  //! @param reply reply proto object
-  //----------------------------------------------------------------------------
-  int DisableSubcmd(const eos::console::IoProto_DisableProto& disable,
-                    eos::console::ReplyProto& reply);
-
-  //----------------------------------------------------------------------------
   //! Execute report subcommand
   //!
   //! @param report report subcommand proto object

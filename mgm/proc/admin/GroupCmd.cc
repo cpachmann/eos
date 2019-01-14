@@ -79,7 +79,7 @@ GroupCmd::LsSubcmd(const eos::console::GroupProto_LsProto& ls,
     //ls.set_outformat(eos::console::GroupProto_LsProto::IOGROUP); // #TOCK it was mOutFormat="io", but then mOutFormat never used again apparently
     break;
 
-  case eos::console::GroupProto_LsProto::LONGER:
+  case eos::console::GroupProto_LsProto::LISTING:
     format = FsView::GetGroupFormat("l");
     mListFormat = FsView::GetFileSystemFormat("l");
     break;
