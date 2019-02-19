@@ -6,7 +6,6 @@ stages:
   - clean
 
 
-
 before_script:
   - source gitlab-ci/export_branch.sh
   - echo "Exporting BRANCH=${BRANCH}"
@@ -431,7 +430,6 @@ prod_docker_image_tag:
   allow_failure: true
   only:
     - tags
-
 
 
 unit_test:
