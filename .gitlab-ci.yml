@@ -431,7 +431,7 @@ prod_docker_image_tag:
   only:
     - tags
 
-    
+   
 unit_test:
   stage: test
   image: gitlab-registry.cern.ch/linuxsupport/cc7-base
