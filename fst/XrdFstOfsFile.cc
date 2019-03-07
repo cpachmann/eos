@@ -63,8 +63,8 @@ XrdFstOfsFile::XrdFstOfsFile(const char* user, int MonID) :
   commitReconstruction(false), mEventOnClose(false), mEventWorkflow(""),
   mSyncEventOnClose(false),
   mIsOCchunk(false), writeErrorFlag(false), mTpcFlag(kTpcNone),
-  fMd(nullptr), layOut(nullptr), maxOffsetWritten(0),
-  openSize(0), closeSize(0),
+  fMd(nullptr), mCheckSum(nullptr), layOut(nullptr), maxOffsetWritten(0),
+  openSize(0), closeSize(0), mCloseCb(nullptr),
   mTpcThreadStatus(EINVAL), mTpcState(kTpcIdle), mTpcRetc(0)
 {
   rBytes = wBytes = sFwdBytes = sBwdBytes = sXlFwdBytes
@@ -777,14 +777,14 @@ XrdFstOfsFile::modified()
 
   // Check if the file could have been changed in the meanwhile ...
   if (fileExists && isReplication && (!isRW)) {
-    if(gOFS.openedForWriting.isOpen(mFsId, mFileId)) {
-        eos_err("file is now open for writing - discarding replication "
-                "[wopen=%d]", gOFS.openedForWriting.getUseCount(mFsId, mFileId));
-        gOFS.Emsg("closeofs", error, EIO,
-                  "guarantee correctness - "
-                  "file has been opened for writing during replication",
-                  mNsPath.c_str());
-        rc = SFS_ERROR;
+    if (gOFS.openedForWriting.isOpen(mFsId, mFileId)) {
+      eos_err("file is now open for writing - discarding replication "
+              "[wopen=%d]", gOFS.openedForWriting.getUseCount(mFsId, mFileId));
+      gOFS.Emsg("closeofs", error, EIO,
+                "guarantee correctness - "
+                "file has been opened for writing during replication",
+                mNsPath.c_str());
+      rc = SFS_ERROR;
     }
 
     if ((statinfo.st_mtime != updateStat.st_mtime)) {
@@ -1428,7 +1428,8 @@ XrdFstOfsFile::close()
 
       if (isRW) {
         if ((mIsInjection || isCreation || IsChunkedUpload()) && (!rc) &&
-            (gOFS.openedForWriting.getUseCount(fMd->mProtoFmd.fsid(), fMd->mProtoFmd.fid() > 1))) {
+            (gOFS.openedForWriting.getUseCount(fMd->mProtoFmd.fsid(),
+                                               fMd->mProtoFmd.fid() > 1))) {
           // indicate that this file was closed properly and disable further delete on close
           gOFS.WNoDeleteOnCloseFid[fMd->mProtoFmd.fsid()][fMd->mProtoFmd.fid()] = true;
         }
@@ -1438,7 +1439,8 @@ XrdFstOfsFile::close()
         gOFS.openedForReading.down(fMd->mProtoFmd.fsid(), fMd->mProtoFmd.fid());
       }
 
-      if(!gOFS.openedForWriting.isOpen(fMd->mProtoFmd.fsid(), fMd->mProtoFmd.fid())) {
+      if (!gOFS.openedForWriting.isOpen(fMd->mProtoFmd.fsid(),
+                                        fMd->mProtoFmd.fid())) {
         // When the last writer is gone we can remove the prohibiting entry
         gOFS.WNoDeleteOnCloseFid[fMd->mProtoFmd.fsid()].erase(fMd->mProtoFmd.fid());
         gOFS.WNoDeleteOnCloseFid[fMd->mProtoFmd.fsid()].resize(0);
@@ -1745,14 +1747,29 @@ XrdFstOfsFile::close()
                             mCapOpaque->Get("mgm.manager"), capOpaqueFile,
                             nullptr, 30, mSyncEventOnClose, false);
     }
+
+    // Mask close error for fusex, if the file had been removed already
+    if (mFusexIsUnlinked && mFusex) {
+      rc = 0;
+      error.setErrCode(0);
+    }
   }
 
-  // Mask close error for fusex, if the file had been removed already
-  if (mFusexIsUnlinked && mFusex) {
-    rc = 0;
-    error.setErrCode(0);
-  }
-
+  // Create a close callback and put the client in waiting mode
+  mCloseCb.reset(new XrdOucCallBack());
+  mCloseCb->Init(&error);
+  error.setErrCB(mCloseCb.get());
+  error.setErrInfo(120, "");
+  eos_info("%s", "msg=\"setting up the callback object\"");
+  std::thread t([&]() {
+    eos_info("%s", "msg=\"doing work in the async thread\"");
+    std::this_thread::sleep_for(std::chrono::seconds(80));
+    eos_info("%s", "msg=\"done work in the async thread\"");
+    int reply_rc = mCloseCb->Reply(SFS_OK, 100, "");
+    eos_info("msg=\"callback reply rc=%i\"", reply_rc);
+  });
+  t.detach();
+  rc = SFS_STARTED;
   eos_info("Return code rc=%i errc=%d", rc, error.getErrInfo());
   return rc;
 }
@@ -3227,23 +3244,28 @@ XrdFstOfsFile::ExtractLogId(const char* opaque) const
 //------------------------------------------------------------------------------
 // Translate a cta ResponseType to std::string
 //------------------------------------------------------------------------------
-static std::string ctaResponseCodeToString(cta::xrd::Response::ResponseType rt) {
-  switch(rt) {
-    case cta::xrd::Response::RSP_ERR_CTA: {
-      return "RSP_ERR_CTA";
-    }
-    case cta::xrd::Response::RSP_ERR_USER: {
-      return "RSP_ERR_USER";
-    }
-    case cta::xrd::Response::RSP_ERR_PROTOBUF: {
-      return "RSP_ERR_PROTOBUF";
-    }
-    case cta::xrd::Response::RSP_INVALID: {
-      return "RSP_INVALID";
-    }
-    default: {
-      return "";
-    }
+static std::string ctaResponseCodeToString(cta::xrd::Response::ResponseType rt)
+{
+  switch (rt) {
+  case cta::xrd::Response::RSP_ERR_CTA: {
+    return "RSP_ERR_CTA";
+  }
+
+  case cta::xrd::Response::RSP_ERR_USER: {
+    return "RSP_ERR_USER";
+  }
+
+  case cta::xrd::Response::RSP_ERR_PROTOBUF: {
+    return "RSP_ERR_PROTOBUF";
+  }
+
+  case cta::xrd::Response::RSP_INVALID: {
+    return "RSP_INVALID";
+  }
+
+  default: {
+    return "";
+  }
   }
 
   return "";
@@ -3359,7 +3381,8 @@ XrdFstOfsFile::NotifyProtoWfEndPointClosew(const Fmd& fmd,
   case cta::xrd::Response::RSP_ERR_PROTOBUF:
   case cta::xrd::Response::RSP_INVALID:
     errMsgBack = response.message_txt();
-    eos_static_err("%s for file %s. Reason: %s", ctaResponseCodeToString(response.type()).c_str(),
+    eos_static_err("%s for file %s. Reason: %s",
+                   ctaResponseCodeToString(response.type()).c_str(),
                    fullPath.c_str(), response.message_txt().c_str());
     return EPROTO;
 
