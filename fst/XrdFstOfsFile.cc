@@ -1,6 +1,5 @@
 //------------------------------------------------------------------------------
 // File: XrdFstOfsFile.cc
-// Author: Elvin-Alin Sindrilaru / Andreas-Joachim Peters - CERN
 //------------------------------------------------------------------------------
 
 /************************************************************************
@@ -20,8 +19,8 @@
  * You should have received a copy of the GNU General Public License    *
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.*
  ************************************************************************/
-#define __STDC_FORMAT_MACROS
-#include <cinttypes>
+#include "fst/XrdFstOfsFile.hh"
+#include "fst/XrdFstOfs.hh"
 #include "common/Constants.hh"
 #include "common/Path.hh"
 #include "common/http/OwnCloud.hh"
@@ -29,8 +28,6 @@
 #include "common/SecEntity.hh"
 #include "common/xrootd-ssi-protobuf-interface/eos_cta/include/CtaFrontendApi.hpp"
 #include "fst/FmdDbMap.hh"
-#include "fst/XrdFstOfsFile.hh"
-#include "fst/XrdFstOfs.hh"
 #include "fst/layout/Layout.hh"
 #include "fst/layout/LayoutPlugin.hh"
 #include "fst/checksum/ChecksumPlugins.hh"
@@ -53,19 +50,18 @@ XrdFstOfsFile::XrdFstOfsFile(const char* user, int MonID) :
   mOpenOpaque(nullptr), mCapOpaque(nullptr), mFstPath(""), mBookingSize(0),
   mTargetSize(0), mMinSize(0), mMaxSize(0), viaDelete(false),
   writeDelete(false), mRainSize(0), mNsPath(""), mLocalPrefix(""),
-  mRedirectManager(""), mSecString(""), mTpcKey(""), mEtag(""), mFileId(0),
-  mFsId(0), mLid(0), mCid(0), mForcedMtime(1), mForcedMtime_ms(0), mFusex(false),
-  mFusexIsUnlinked(false),
-  closed(false), opened(false), mHasWrite(false), hasWriteError(false),
-  hasReadError(false), isRW(false), mIsTpcDst(false), mIsDevNull(false),
-  isCreation(false), isReplication(false), mIsInjection(false),
-  mRainReconstruct(false), deleteOnClose(false), repairOnClose(false),
+  mRedirectManager(""), mSecString(""), mEtag(""), mFileId(0),
+  mFsId(0), mLid(0), mCid(0), mForcedMtime(1), mForcedMtime_ms(0),
+  mFusex(false), mFusexIsUnlinked(false), closed(false), opened(false),
+  mHasWrite(false), hasWriteError(false), hasReadError(false), isRW(false),
+  mIsDevNull(false), isCreation(false), isReplication(false),
+  mIsInjection(false), mRainReconstruct(false), deleteOnClose(false),
+  repairOnClose(false), mIsOCchunk(false), writeErrorFlag(false),
   commitReconstruction(false), mEventOnClose(false), mEventWorkflow(""),
-  mSyncEventOnClose(false),
-  mIsOCchunk(false), writeErrorFlag(false), mTpcFlag(kTpcNone),
-  fMd(nullptr), mCheckSum(nullptr), layOut(nullptr), maxOffsetWritten(0),
-  openSize(0), closeSize(0), mCloseCb(nullptr),
-  mTpcThreadStatus(EINVAL), mTpcState(kTpcIdle), mTpcRetc(0)
+  mSyncEventOnClose(false), mFmd(nullptr), mCheckSum(nullptr),
+  mLayout(nullptr), mCloseCb(nullptr), maxOffsetWritten(0ull), openSize(0),
+  closeSize(0), mTpcThreadStatus(EINVAL), mTpcState(kTpcIdle),
+  mTpcFlag(kTpcNone), mTpcKey(""), mIsTpcDst(false), mTpcRetc(0)
 {
   rBytes = wBytes = sFwdBytes = sBwdBytes = sXlFwdBytes
                                 = sXlBwdBytes = rOffset = wOffset = 0;
@@ -77,8 +73,6 @@ XrdFstOfsFile::XrdFstOfsFile(const char* user, int MonID) :
   closeTime.tv_sec = closeTime.tv_usec = 0;
   openTime.tv_sec = openTime.tv_usec = 0;
   tz.tz_dsttime = tz.tz_minuteswest = 0;
-  mTimeout = getenv("EOS_FST_STREAM_TIMEOUT") ?
-             strtoul(getenv("EOS_FST_STREAM_TIMEOUT"), 0, 10) : msDefaultTimeout;
 }
 
 //------------------------------------------------------------------------------
@@ -91,73 +85,6 @@ XrdFstOfsFile::~XrdFstOfsFile()
   if (!closed) {
     close();
   }
-
-  // Unmap the MD record
-  if (fMd) {
-    delete fMd;
-    fMd = 0;
-  }
-
-  if (layOut) {
-    delete layOut;
-    layOut = 0;
-  }
-}
-
-//------------------------------------------------------------------------------
-// Open - - low level ofs method which is called from one of the layout plugins
-//------------------------------------------------------------------------------
-int
-XrdFstOfsFile::openofs(const char* path,
-                       XrdSfsFileOpenMode open_mode,
-                       mode_t create_mode,
-                       const XrdSecEntity* client,
-                       const char* opaque)
-{
-  int retc = 0;
-
-  while ((retc = XrdOfsFile::open(path, open_mode, create_mode, client,
-                                  opaque)) > 0) {
-    eos_static_notice("msg\"xrootd-lock-table busy - snoozing & retry\" "
-                      "delay=%d errno=%d", retc, errno);
-    std::this_thread::sleep_for(std::chrono::seconds(retc));
-  }
-
-  return retc;
-}
-
-//------------------------------------------------------------------------------
-// Drop all replicas from the MGM
-//------------------------------------------------------------------------------
-int
-XrdFstOfsFile::dropall(eos::common::FileId::fileid_t fileid, std::string path,
-                       std::string manager)
-{
-  // If we committed the replica and an error happened remote, we have
-  // to unlink it again
-  XrdOucString hexstring = "";
-  eos::common::FileId::Fid2Hex(fileid, hexstring);
-  XrdOucErrInfo error;
-  XrdOucString capOpaqueString = "/?mgm.pcmd=drop";
-  XrdOucString OpaqueString = "";
-  OpaqueString += "&mgm.fid=";
-  OpaqueString += hexstring;
-  OpaqueString += "&mgm.fsid=anyway";
-  OpaqueString += "&mgm.dropall=1";
-  XrdOucEnv Opaque(OpaqueString.c_str());
-  capOpaqueString += OpaqueString;
-  // Delete the replica in the MGM
-  int rcode = gOFS.CallManager(&error, path.c_str(), manager.c_str(),
-                               capOpaqueString);
-
-  if (rcode && (error.getErrInfo() != EIDRM)) {
-    eos_warning("(unpersist): unable to drop file id %s fsid %u at manager %s",
-                hexstring.c_str(), fileid, manager.c_str());
-  }
-
-  eos_info("info=\"removing on manager\" manager=%s fid=%llu fsid= drop-allrc=%d",
-           manager.c_str(), (unsigned long long) fileid, rcode);
-  return rcode;
 }
 
 //------------------------------------------------------------------------------
@@ -171,7 +98,7 @@ XrdFstOfsFile::open(const char* path, XrdSfsFileOpenMode open_mode,
   EPNAME("open");
   const char* tident = error.getErrUser();
   SetLogId(ExtractLogId(opaque).c_str(), client, tident);
-  tIdent = error.getErrUser();
+  mTident = error.getErrUser();
   char* val = 0;
   isRW = false;
   int retc = SFS_OK;
@@ -289,19 +216,18 @@ XrdFstOfsFile::open(const char* path, XrdSfsFileOpenMode open_mode,
 
   eos_info("fstpath=%s", mFstPath.c_str());
   // Get the layout object
-  layOut = eos::fst::LayoutPlugin::GetLayoutObject
-           (this, mLid, client, &error, mFstPath.c_str(), msDefaultTimeout,
-            mRainReconstruct);
+  mLayout.reset(eos::fst::LayoutPlugin::GetLayoutObject
+                (this, mLid, client, &error, mFstPath.c_str(), msDefaultTimeout,
+                 mRainReconstruct));
 
-  if (!layOut) {
+  if (mLayout == nullptr) {
     int envlen;
     eos_err("unable to handle layout for %s", mCapOpaque->Env(envlen));
-    delete fMd;
     return gOFS.Emsg(epname, error, EINVAL, "open - illegal layout specified ",
                      mCapOpaque->Env(envlen));
   }
 
-  layOut->SetLogId(logId, client, tident);
+  mLayout->SetLogId(logId, client, tident);
   errno = 0;
 
   if ((mRainReconstruct && (mTpcFlag == kTpcSrcCanDo)) ||
@@ -310,11 +236,10 @@ XrdFstOfsFile::open(const char* path, XrdSfsFileOpenMode open_mode,
     return SFS_OK;
   }
 
-  if ((retc = layOut->GetFileIo()->fileExists())) {
+  if ((retc = mLayout->GetFileIo()->fileExists())) {
     // We have to distinguish if an Exists call fails or return ENOENT, otherwise
     // we might trigger an automatic clean-up of a file !!!
     if (errno != ENOENT) {
-      delete fMd;
       return gOFS.Emsg(epname, error, EIO, "open - unable to check for existance"
                        " of file ", mCapOpaque->Env(envlen));
     }
@@ -421,30 +346,30 @@ XrdFstOfsFile::open(const char* path, XrdSfsFileOpenMode open_mode,
   }
 
   eos_info("fstpath=%s", mFstPath.c_str());
-  fMd = gFmdDbMapHandler.LocalGetFmd(mFileId, mFsId, vid.uid, vid.gid, mLid, isRW,
-                                     isRepairRead);
+  mFmd.reset(gFmdDbMapHandler.LocalGetFmd(mFileId, mFsId, vid.uid, vid.gid,
+                                          mLid, isRW, isRepairRead));
 
-  if ((!fMd) || gOFS.Simulate_FMD_open_error) {
+  if ((mFmd == nullptr) || gOFS.Simulate_FMD_open_error) {
     if (!gOFS.Simulate_FMD_open_error) {
       // Get the layout object
       if (gFmdDbMapHandler.ResyncMgm(mFsId, mFileId, mRedirectManager.c_str())) {
         eos_info("msg=\"resync ok\" fsid=%lu fid=%llx", (unsigned long) mFsId, mFileId);
-        fMd = gFmdDbMapHandler.LocalGetFmd(mFileId, mFsId, vid.uid, vid.gid, mLid,
-                                           isRW);
+        mFmd.reset(gFmdDbMapHandler.LocalGetFmd(mFileId, mFsId, vid.uid,
+                                                vid.gid, mLid, isRW));
       } else {
         eos_err("msg=\"resync failed\" fsid=%lu fid=%llx", (unsigned long) mFsId,
                 mFileId);
       }
     }
 
-    if ((!fMd) || gOFS.Simulate_FMD_open_error) {
-      if ((!isRW) || (layOut->IsEntryServer() && (!isReplication))) {
+    if ((mFmd == nullptr) || gOFS.Simulate_FMD_open_error) {
+      if ((!isRW) || (mLayout->IsEntryServer() && (!isReplication))) {
         eos_crit("no fmd for fileid %llu on filesystem %lu", mFileId, mFsId);
         eos_warning("failed to get FMD record return recoverable error ENOENT(kXR_NotFound)");
 
         if (hasCreationMode) {
           // clean-up before re-bouncing
-          dropall(mFileId, path, mRedirectManager.c_str());
+          DropAllFromMgm(mFileId, path, mRedirectManager.c_str());
         }
 
         // Return an error that can be recovered at the MGM
@@ -463,11 +388,11 @@ XrdFstOfsFile::open(const char* path, XrdSfsFileOpenMode open_mode,
   oss_opaque += static_cast<int>(mBookingSize);
   // Open layout implementation
   eos_info("fstpath=%s open-mode=%x create-mode=%x layout-name=%s",
-           mFstPath.c_str(), open_mode, create_mode, layOut->GetName());
-  int rc = layOut->Open(open_mode, create_mode, oss_opaque.c_str());
+           mFstPath.c_str(), open_mode, create_mode, mLayout->GetName());
+  int rc = mLayout->Open(open_mode, create_mode, oss_opaque.c_str());
 
   if (isReplication && !isCreation) {
-    layOut->Stat(&updateStat);
+    mLayout->Stat(&updateStat);
   }
 
   if ((!rc) && isCreation && mBookingSize) {
@@ -475,14 +400,14 @@ XrdFstOfsFile::open(const char* path, XrdSfsFileOpenMode open_mode,
     XrdSysMutexHelper lock(gOFS.Storage->mFsFullMapMutex);
 
     if (gOFS.Storage->mFsFullMap[mFsId]) {
-      if (layOut->IsEntryServer() && (!isReplication)) {
+      if (mLayout->IsEntryServer() && (!isReplication)) {
         writeErrorFlag = kOfsDiskFullError;
-        layOut->Remove();
+        mLayout->Remove();
         eos_warning("not enough space return recoverable error ENODEV(kXR_FSError)");
 
         if (hasCreationMode) {
           // clean-up before re-bouncing
-          dropall(mFileId, path, mRedirectManager.c_str());
+          DropAllFromMgm(mFileId, path, mRedirectManager.c_str());
         }
 
         // Return an error that can be recovered at the MGM
@@ -497,26 +422,26 @@ XrdFstOfsFile::open(const char* path, XrdSfsFileOpenMode open_mode,
                        : FName());
     }
 
-    rc = layOut->Fallocate(mBookingSize);
+    rc = mLayout->Fallocate(mBookingSize);
 
     if (rc) {
       eos_crit("file allocation gave return code %d errno=%d for allocation of size=%llu",
                rc, errno, mBookingSize);
 
-      if (layOut->IsEntryServer() && (!isReplication)) {
-        layOut->Remove();
+      if (mLayout->IsEntryServer() && (!isReplication)) {
+        mLayout->Remove();
         eos_warning("not enough space i.e file allocation failed, return "
                     "recoverable error ENODEV(kXR_FSError)");
 
         if (hasCreationMode) {
           // clean-up before re-bouncing
-          dropall(mFileId, path, mRedirectManager.c_str());
+          DropAllFromMgm(mFileId, path, mRedirectManager.c_str());
         }
 
         // Return an error that can be recovered at the MGM
         return gOFS.Emsg(epname, error, ENODEV, "open - file allocation failed");
       } else {
-        layOut->Remove();
+        mLayout->Remove();
         return gOFS.Emsg(epname, error, ENOSPC, "open - cannot allocate required space",
                          mNsPath.c_str());
       }
@@ -524,26 +449,26 @@ XrdFstOfsFile::open(const char* path, XrdSfsFileOpenMode open_mode,
   }
 
   eos_info("checksum_object=0x%llx entryserver=%d",
-           (unsigned long long) mCheckSum.get(), layOut->IsEntryServer());
+           (unsigned long long) mCheckSum.get(), mLayout->IsEntryServer());
 
   if (!isCreation) {
     // Get the real size of the file, not the local stripe size!
     struct stat statinfo {};
 
-    if ((retc = layOut->Stat(&statinfo))) {
+    if ((retc = mLayout->Stat(&statinfo))) {
       return gOFS.Emsg(epname, error, EIO,
                        "open - cannot stat layout to determine file size", mNsPath.c_str());
     }
 
     // We feed the layout size, not the physical on disk!
     eos_info("msg=\"layout size\": disk_size=%zu db_size= %llu",
-             statinfo.st_size, fMd->mProtoFmd.size());
+             statinfo.st_size, mFmd->mProtoFmd.size());
 
-    if ((off_t) statinfo.st_size != (off_t) fMd->mProtoFmd.size()) {
+    if ((off_t) statinfo.st_size != (off_t) mFmd->mProtoFmd.size()) {
       // In a RAID-like layout if the header is corrupted there is no way to know
       // the size of the initial file, therefore we take the value from the DB
       if (!mRainReconstruct) {
-        openSize = fMd->mProtoFmd.size();
+        openSize = mFmd->mProtoFmd.size();
       } else {
         openSize = statinfo.st_size;
       }
@@ -553,15 +478,15 @@ XrdFstOfsFile::open(const char* path, XrdSfsFileOpenMode open_mode,
 
     // Preset with the last known checksum
     if (mCheckSum && isRW && !IsChunkedUpload()) {
-      eos_info("msg=\"reset init\" file-xs=%s", fMd->mProtoFmd.checksum().c_str());
-      mCheckSum->ResetInit(0, openSize, fMd->mProtoFmd.checksum().c_str());
+      eos_info("msg=\"reset init\" file-xs=%s", mFmd->mProtoFmd.checksum().c_str());
+      mCheckSum->ResetInit(0, openSize, mFmd->mProtoFmd.checksum().c_str());
     }
   }
 
   // If we are not the entry server for RAIN layouts we disable the checksum
   // object for write. If we read we don't check checksums at all since we
   // have block and parity checking.
-  if (IsRainLayout(mLid) && ((!isRW) || (!layOut->IsEntryServer()))) {
+  if (IsRainLayout(mLid) && ((!isRW) || (!mLayout->IsEntryServer()))) {
     mCheckSum.reset(nullptr);
   }
 
@@ -570,7 +495,7 @@ XrdFstOfsFile::open(const char* path, XrdSfsFileOpenMode open_mode,
   if (!rc) {
     // Set the eos lfn as extended attribute
     std::unique_ptr<FileIo> io(FileIoPlugin::GetIoObject(
-                                 layOut->GetLocalReplicaPath(), this));
+                                 mLayout->GetLocalReplicaPath(), this));
 
     if (isRW) {
       if (mNsPath.beginswith("/replicate:") || mNsPath.beginswith("/fusex-open")) {
@@ -617,12 +542,12 @@ XrdFstOfsFile::open(const char* path, XrdSfsFileOpenMode open_mode,
   } else {
     // If we have local errors in open we don't disable the filesystem -
     // this is done by the Scrub thread if necessary!
-    if (layOut->IsEntryServer() && (!isReplication)) {
+    if (mLayout->IsEntryServer() && (!isReplication)) {
       eos_warning("open error return recoverable error EIO(kXR_IOError)");
 
       // Clean-up before re-bouncing
       if (hasCreationMode) {
-        dropall(mFileId, path, mRedirectManager.c_str());
+        DropAllFromMgm(mFileId, path, mRedirectManager.c_str());
       }
     }
 
@@ -640,158 +565,88 @@ XrdFstOfsFile::open(const char* path, XrdSfsFileOpenMode open_mode,
 }
 
 //------------------------------------------------------------------------------
-// Account for total read time
-//------------------------------------------------------------------------------
-void
-XrdFstOfsFile::AddReadTime()
-{
-  unsigned long mus = (lrTime.tv_sec - cTime.tv_sec) * 1000000 +
-                      (lrTime.tv_usec - cTime.tv_usec);
-  rTime.tv_sec += (mus / 1000000);
-  rTime.tv_usec += (mus % 1000000);
-}
-
-//------------------------------------------------------------------------------
-// Account for total readv time
-//------------------------------------------------------------------------------
-void
-XrdFstOfsFile::AddReadVTime()
-{
-  unsigned long mus = (lrvTime.tv_sec - cTime.tv_sec) * 1000000 +
-                      (lrvTime.tv_usec - cTime.tv_usec);
-  rvTime.tv_sec += (mus / 1000000);
-  rvTime.tv_usec += (mus % 1000000);
-}
-
-//------------------------------------------------------------------------------
-// Account for total write time
-//------------------------------------------------------------------------------
-void
-XrdFstOfsFile::AddWriteTime()
-{
-  unsigned long mus = ((lwTime.tv_sec - cTime.tv_sec) * 1000000) +
-                      lwTime.tv_usec - cTime.tv_usec;
-  wTime.tv_sec += (mus / 1000000);
-  wTime.tv_usec += (mus % 1000000);
-}
-
-//------------------------------------------------------------------------------
-// Make report
-//------------------------------------------------------------------------------
-void
-XrdFstOfsFile::MakeReportEnv(XrdOucString& reportString)
-{
-  // compute avg, min, max, sigma for read and written bytes
-  unsigned long long rmin, rmax, rsum;
-  unsigned long long rvmin, rvmax, rvsum; // readv bytes
-  unsigned long long rsmin, rsmax, rssum; // read single bytes
-  unsigned long rcmin, rcmax, rcsum;      // readv count
-  unsigned long long wmin, wmax, wsum;
-  double rsigma, rvsigma, rssigma, rcsigma, wsigma;
-  {
-    XrdSysMutexHelper vecLock(vecMutex);
-    ComputeStatistics(rvec, rmin, rmax, rsum, rsigma);
-    ComputeStatistics(wvec, wmin, wmax, wsum, wsigma);
-    ComputeStatistics(monReadvBytes, rvmin, rvmax, rvsum, rvsigma);
-    ComputeStatistics(monReadSingleBytes, rsmin, rsmax, rssum, rssigma);
-    ComputeStatistics(monReadvCount, rcmin, rcmax, rcsum, rcsigma);
-    char report[16384];
-
-    if (rmin == 0xffffffff) {
-      rmin = 0;
-    }
-
-    if (wmin == 0xffffffff) {
-      wmin = 0;
-    }
-
-    snprintf(report, sizeof(report) - 1,
-             "log=%s&path=%s&fstpath=%s&ruid=%u&rgid=%u&td=%s&"
-             "host=%s&lid=%lu&fid=%llu&fsid=%lu&"
-             "ots=%lu&otms=%lu&"
-             "cts=%lu&ctms=%lu&"
-             "nrc=%lu&nwc=%lu&"
-             "rb=%llu&rb_min=%llu&rb_max=%llu&rb_sigma=%.02f&"
-             "rv_op=%llu&rvb_min=%llu&rvb_max=%llu&rvb_sum=%llu&rvb_sigma=%.02f&"
-             "rs_op=%llu&rsb_min=%llu&rsb_max=%llu&rsb_sum=%llu&rsb_sigma=%.02f&"
-             "rc_min=%lu&rc_max=%lu&rc_sum=%lu&rc_sigma=%.02f&"
-             "wb=%llu&wb_min=%llu&wb_max=%llu&wb_sigma=%.02f&"
-             "sfwdb=%llu&sbwdb=%llu&sxlfwdb=%llu&sxlbwdb=%llu&"
-             "nfwds=%lu&nbwds=%lu&nxlfwds=%lu&nxlbwds=%lu&"
-             "rt=%.02f&rvt=%.02f&wt=%.02f&osize=%llu&csize=%llu&%s"
-             , this->logId
-             , mCapOpaque->Get("mgm.path") ? mCapOpaque->Get("mgm.path") : mNsPath.c_str()
-             , mFstPath.c_str()
-             , this->vid.uid, this->vid.gid, tIdent.c_str()
-             , gOFS.mHostName, mLid, mFileId, mFsId
-             , openTime.tv_sec, (unsigned long) openTime.tv_usec / 1000
-             , closeTime.tv_sec, (unsigned long) closeTime.tv_usec / 1000
-             , rCalls, wCalls
-             , rsum, rmin, rmax, rsigma
-             , (unsigned long long)monReadvBytes.size(), rvmin, rvmax, rvsum, rvsigma
-             , (unsigned long long)monReadSingleBytes.size(), rsmin, rsmax, rssum, rssigma
-             , rcmin, rcmax, rcsum, rcsigma
-             , wsum
-             , wmin
-             , wmax
-             , wsigma
-             , sFwdBytes
-             , sBwdBytes
-             , sXlFwdBytes
-             , sXlBwdBytes
-             , nFwdSeeks
-             , nBwdSeeks
-             , nXlFwdSeeks
-             , nXlBwdSeeks
-             , ((rTime.tv_sec * 1000.0) + (rTime.tv_usec / 1000.0))
-             , ((rvTime.tv_sec * 1000.0) + (rvTime.tv_usec / 1000.0))
-             , ((wTime.tv_sec * 1000.0) + (wTime.tv_usec / 1000.0))
-             , (unsigned long long) openSize
-             , (unsigned long long) closeSize
-             , eos::common::SecEntity::ToEnv(mSecString.c_str(),
-                 ((mTpcFlag == kTpcDstSetup) ||
-                  (mTpcFlag == kTpcSrcRead)) ? "tpc" : 0).c_str());
-    reportString = report;
-  }
-}
-
-//------------------------------------------------------------------------------
-// Check if file has been modified while in use
+// Pre-read into file system cache
 //------------------------------------------------------------------------------
 int
-XrdFstOfsFile::modified()
+XrdFstOfsFile::read(XrdSfsFileOffset fileOffset, XrdSfsXferSize amount)
 {
-  int rc = 0;
-  bool fileExists = true;
-  struct stat statinfo;
+  int rc = XrdOfsFile::read(fileOffset, amount);
+  eos_debug("rc=%d offset=%lu size=%llu", rc, fileOffset, amount);
+  return rc;
+}
 
-  if (layOut) {
-    if ((layOut->Stat(&statinfo))) {
-      fileExists = false;
-    }
-  } else {
-    if ((XrdOfsOss->Stat(mFstPath.c_str(), &statinfo))) {
-      fileExists = false;
+//------------------------------------------------------------------------------
+// Read AIO - not supported
+//------------------------------------------------------------------------------
+int
+XrdFstOfsFile::read(XrdSfsAio* aioparm)
+{
+  return gOFS.Emsg("read_aio", error, ENOTSUP, "read aio - operation not "
+                   "supported");
+}
+
+//------------------------------------------------------------------------------
+// Read from file
+//------------------------------------------------------------------------------
+XrdSfsXferSize
+XrdFstOfsFile::read(XrdSfsFileOffset fileOffset, char* buffer,
+                    XrdSfsXferSize buffer_size)
+{
+  eos_debug("fileOffset=%lli, buffer_size=%i", fileOffset, buffer_size);
+
+  //  EPNAME("read");
+  if (mTpcFlag == kTpcSrcRead) {
+    if (!(rCalls % 10)) {
+      if (!TpcValid()) {
+        eos_err("msg=\"tcp interrupted by control-c - cancel tcp read\" key=%s",
+                mTpcKey.c_str());
+        return gOFS.Emsg("read", error, EINTR, "read - tpc transfer interrupted"
+                         " by client disconnect", FName());
+      }
     }
   }
 
-  // Check if the file could have been changed in the meanwhile ...
-  if (fileExists && isReplication && (!isRW)) {
-    if (gOFS.openedForWriting.isOpen(mFsId, mFileId)) {
-      eos_err("file is now open for writing - discarding replication "
-              "[wopen=%d]", gOFS.openedForWriting.getUseCount(mFsId, mFileId));
-      gOFS.Emsg("closeofs", error, EIO,
-                "guarantee correctness - "
-                "file has been opened for writing during replication",
-                mNsPath.c_str());
-      rc = SFS_ERROR;
-    }
+  int rc = mLayout->Read(fileOffset, buffer, buffer_size);
+  eos_debug("layout read %d checkSum %d", rc, mCheckSum.get());
 
-    if ((statinfo.st_mtime != updateStat.st_mtime)) {
-      eos_err("file has been modified during replication");
-      rc = SFS_ERROR;
-      gOFS.Emsg("closeofs", error, EIO, "guarantee correctness -"
-                "file has been modified during replication", mNsPath.c_str());
+  if ((rc > 0) && (mCheckSum)) {
+    XrdSysMutexHelper cLock(mChecksumMutex);
+    mCheckSum->Add(buffer, static_cast<size_t>(rc),
+                   static_cast<off_t>(fileOffset));
+  }
+
+  if (rc > 0) {
+    rOffset = fileOffset + rc;
+  }
+
+  gettimeofday(&lrTime, &tz);
+  AddReadTime();
+
+  if (rc < 0) {
+    // Here we might take some other action
+    int envlen = 0;
+    eos_crit("block-read error=%d offset=%llu len=%llu file=%s",
+             error.getErrInfo(),
+             static_cast<unsigned long long>(fileOffset),
+             static_cast<unsigned long long>(buffer_size),
+             FName(), mCapOpaque ? mCapOpaque->Env(envlen) : FName());
+    // Used to understand if a reconstruction of a RAIN file worked
+    hasReadError = true;
+  }
+
+  eos_debug("rc=%d offset=%lu size=%llu", rc, fileOffset,
+            static_cast<unsigned long long>(buffer_size));
+
+  if ((fileOffset + buffer_size) >= openSize) {
+    if (mCheckSum) {
+      if (!mCheckSum->NeedsRecalculation()) {
+        // If this is the last read of sequential reading, we can verify
+        // the checksum now
+        if (VerifyChecksum()) {
+          return gOFS.Emsg("read", error, EIO, "read file - wrong file "
+                           "checksum fn=", FName());
+        }
+      }
     }
   }
 
@@ -799,195 +654,305 @@ XrdFstOfsFile::modified()
 }
 
 //------------------------------------------------------------------------------
-// Close - low level ofs method which is called from one of the layout plugins
+// Vector read
 //------------------------------------------------------------------------------
-int
-XrdFstOfsFile::closeofs()
+XrdSfsXferSize
+XrdFstOfsFile::readv(XrdOucIOVec* readV, int readCount)
 {
-  return XrdOfsFile::close();
+  eos_debug("read count=%i", readCount);
+  // Copy the XrdOucIOVec structure to XrdCl::ChunkList
+  uint32_t total_read = 0;
+  XrdCl::ChunkList chunkList;
+  chunkList.reserve(readCount);
+
+  for (int i = 0; i < readCount; ++i) {
+    total_read += (uint32_t)readV[i].size;
+    chunkList.push_back(XrdCl::ChunkInfo((uint64_t)readV[i].offset,
+                                         (uint32_t)readV[i].size,
+                                         (void*)readV[i].data));
+  }
+
+  return mLayout->ReadV(chunkList, total_read);
 }
 
 //------------------------------------------------------------------------------
-// Layout read callback
+// Write to file
 //------------------------------------------------------------------------------
-int
-XrdFstOfsFile::LayoutReadCB(eos::fst::CheckSum::ReadCallBack::callback_data_t*
-                            cbd)
+XrdSfsXferSize
+XrdFstOfsFile::write(XrdSfsFileOffset fileOffset, const char* buffer,
+                     XrdSfsXferSize buffer_size)
 {
-  return ((Layout*) cbd->caller)->Read(cbd->offset, cbd->buffer, cbd->size);
-}
+  if (mIsDevNull) {
+    eos_debug("offset=%llu, length=%li discarded for sink file", fileOffset,
+              buffer_size);
+    maxOffsetWritten = fileOffset + buffer_size;
+    return buffer_size;
+  }
 
-//------------------------------------------------------------------------------
-// File read callback
-//------------------------------------------------------------------------------
-int
-XrdFstOfsFile::FileIoReadCB(eos::fst::CheckSum::ReadCallBack::callback_data_t*
-                            cbd)
-{
-  return ((FileIo*) cbd->caller)->fileRead(cbd->offset, cbd->buffer, cbd->size);
-}
+  int rc = mLayout->Write(fileOffset, const_cast<char*>(buffer), buffer_size);
 
-//------------------------------------------------------------------------------
-// Verify checksum method
-//------------------------------------------------------------------------------
-bool
-XrdFstOfsFile::verifychecksum()
-{
-  bool checksumerror = false;
-  int checksumlen = 0;
+  // If we see a remote IO error, we don't fail, we just call repair afterwards,
+  // only for replica layouts
+  if ((rc < 0) && isCreation &&
+      (mLayout->GetErrObj()->getErrInfo() == EREMOTEIO) &&
+      (eos::common::LayoutId::GetLayoutType(mLid) ==
+       eos::common::LayoutId::kReplica)) {
+    repairOnClose = true;
+    rc = buffer_size;
+  }
 
-  // Deal with checksums
-  if (mCheckSum) {
-    mCheckSum->Finalize();
-
-    if (mCheckSum->NeedsRecalculation()) {
-      if ((!isRW) && ((sFwdBytes + sBwdBytes)
-                      || (mCheckSum->GetMaxOffset() != openSize))) {
-        // We don't rescan files if they are read non-sequential or only
-        // partially
-        eos_debug("info=\"skipping checksum (re-scan) for non-sequential "
-                  "reading ...\"");
-        mCheckSum.reset(nullptr);
-        return false;
-      }
-    } else {
-      eos_debug("isrw=%d max-offset=%lld opensize=%lld", isRW,
-                mCheckSum->GetMaxOffset(), openSize);
-
-      if (((!isRW) && ((mCheckSum->GetMaxOffset() != openSize) ||
-                       (!mCheckSum->GetMaxOffset())))) {
-        eos_debug("info=\"skipping checksum (re-scan) for access without any IO or "
-                  "partial sequential read IO from the beginning...\"");
-        mCheckSum.reset(nullptr);
-        return false;
-      }
-
-      if ((isRW) && mCheckSum->GetMaxOffset() &&
-          (mCheckSum->GetMaxOffset() < openSize)) {
-        // If there was a write which was not extending the file the checksum
-        // is dirty!
-        mCheckSum->SetDirty();
-      }
+  // Evt. add checksum
+  if (rc > 0) {
+    if (mCheckSum) {
+      XrdSysMutexHelper cLock(mChecksumMutex);
+      mCheckSum->Add(buffer, static_cast<size_t>(rc),
+                     static_cast<off_t>(fileOffset));
     }
 
-    // If checksum is not completely computed
-    if (mCheckSum->NeedsRecalculation()) {
-      unsigned long long scansize = 0;
-      float scantime = 0; // is ms
+    if (static_cast<unsigned long long>(fileOffset + buffer_size) >
+        static_cast<unsigned long long>(maxOffsetWritten)) {
+      maxOffsetWritten = (fileOffset + buffer_size);
+    }
+  }
 
-      if (!XrdOfsFile::fctl(SFS_FCTL_GETFD, 0, error)) {
-        // Rescan the file
-        eos::fst::CheckSum::ReadCallBack::callback_data_t cbd;
-        cbd.caller = (void*) layOut;
-        eos::fst::CheckSum::ReadCallBack cb(LayoutReadCB, cbd);
+  mHasWrite = true;
+  eos_debug("rc=%d offset=%lu size=%lu", rc, fileOffset,
+            static_cast<unsigned long>(buffer_size));
 
-        if (mCheckSum->ScanFile(cb, scansize, scantime)) {
-          XrdOucString sizestring;
-          eos_info("info=\"rescanned checksum\" size=%s time=%.02f ms rate=%.02f MB/s %s",
-                   eos::common::StringConversion::GetReadableSizeString(sizestring,
-                       scansize, "B"),
-                   scantime,
-                   1.0 * scansize / 1000 / (scantime ? scantime : 99999999999999LL),
-                   mCheckSum->GetHexChecksum());
-        } else {
-          eos_err("Rescanning of checksum failed");
-          mCheckSum.reset(nullptr);
-          return false;
-        }
+  if (rc < 0) {
+    int envlen = 0;
+
+    if (!hasWriteError || EOS_LOGS_DEBUG) {
+      eos_crit("block-write error=%d offset=%llu len=%llu file=%s",
+               mLayout->GetErrObj()->getErrInfo(),
+               static_cast<unsigned long long>(fileOffset),
+               static_cast<unsigned long long>(buffer_size),
+               FName(), mCapOpaque ? mCapOpaque->Env(envlen) : FName());
+    }
+
+    hasWriteError = true;
+  }
+
+  if (rc < 0) {
+    int envlen = 0;
+    // Indicate the deletion flag for write errors
+    writeDelete = true;
+    XrdOucString errdetail;
+
+    if (isCreation) {
+      XrdOucString newerr;
+      // Add to the error message that this file has been removed after the error,
+      // which happens for creations
+      newerr = error.getErrText();
+
+      if (writeErrorFlag == kOfsSimulatedIoError) {
+        // Simulated IO error
+        errdetail += " => file has been removed because of a simulated IO error";
       } else {
-        eos_err("Couldn't get file descriptor");
-        mCheckSum.reset(nullptr);
-        return false;
+        if (writeErrorFlag == kOfsDiskFullError) {
+          // Disk full error
+          errdetail +=
+            " => file has been removed because the target filesystem  was full";
+        } else {
+          if (writeErrorFlag == kOfsMaxSizeError) {
+            // Maximum file size error
+            errdetail += " => file has been removed because the maximum target "
+                         "filesize defined for that subtree was exceeded (maxsize=";
+            char smaxsize[16];
+            snprintf(smaxsize, sizeof(smaxsize) - 1, "%llu", (unsigned long long) mMaxSize);
+            errdetail += smaxsize;
+            errdetail += " bytes)";
+          } else {
+            if (writeErrorFlag == kOfsIoError) {
+              // Generic IO error
+              errdetail +=
+                " => file has been removed due to an IO error on the target filesystem";
+            } else {
+              errdetail += " => file has been removed due to an IO error (unspecified)";
+            }
+          }
+        }
       }
-    } else {
-      // This was prefect streaming I/O
-      if ((!isRW) && (mCheckSum->GetMaxOffset() != openSize)) {
-        eos_info("info=\"skipping checksum (re-scan) since file was not read "
-                 "completely %llu %llu...\"", mCheckSum->GetMaxOffset(), openSize);
-        mCheckSum.reset(nullptr);
-        return false;
-      }
+
+      newerr += errdetail.c_str();
+      error.setErrInfo(error.getErrInfo(), newerr.c_str());
     }
 
-    if (isRW) {
-      eos_info("(write) checksum type: %s checksum hex: %s requested-checksum hex: %s",
-               mCheckSum->GetName(), mCheckSum->GetHexChecksum(),
-               mOpenOpaque->Get("mgm.checksum") ? mOpenOpaque->Get("mgm.checksum") : "-none-");
+    eos_err("block-write error=%d offset=%llu len=%llu file=%s error=\"%s\"",
+            error.getErrInfo(),
+            (unsigned long long) fileOffset,
+            (unsigned long long) buffer_size, FName(),
+            mCapOpaque ? mCapOpaque->Env(envlen) : FName(),
+            errdetail.c_str());
+  }
 
-      // Check if the check sum for the file was given at upload time
-      if (mOpenOpaque->Get("mgm.checksum")) {
-        XrdOucString opaqueChecksum = mOpenOpaque->Get("mgm.checksum");
-        XrdOucString hexChecksum = mCheckSum->GetHexChecksum();
+  return rc;
+}
 
-        if ((opaqueChecksum != "disable") && (opaqueChecksum != hexChecksum)) {
-          eos_err("requested checksum %s does not match checksum %s of uploaded"
-                  " file", opaqueChecksum.c_str(), hexChecksum.c_str());
-          mCheckSum.reset(nullptr);
-          return true;
+//------------------------------------------------------------------------------
+// Write AIO - no supported
+//------------------------------------------------------------------------------
+int
+XrdFstOfsFile::write(XrdSfsAio* aioparm)
+{
+  return gOFS.Emsg("write_aio", error, ENOTSUP, "write aio - operation not "
+                   "supported");
+}
+
+//------------------------------------------------------------------------------
+// Get file stat information
+//------------------------------------------------------------------------------
+int
+XrdFstOfsFile::stat(struct stat* buf)
+{
+  EPNAME("stat");
+  int rc = SFS_OK;
+
+  if (mIsDevNull) {
+    buf->st_size = maxOffsetWritten;
+    return rc;
+  }
+
+  if (mRainReconstruct) {
+    buf->st_size = mRainSize;
+    return rc;
+  }
+
+  if (mLayout) {
+    if ((rc = mLayout->Stat(buf)))
+      rc = gOFS.Emsg(epname, error, EIO, "stat - cannot stat layout to determine"
+                     " file size ", mNsPath.c_str());
+  } else {
+    rc = gOFS.Emsg(epname, error, ENXIO, "stat - no layout to determine file size ",
+                   mNsPath.c_str());
+  }
+
+  // store the file id as inode number
+  if (!rc) {
+    buf->st_ino = eos::common::FileId::FidToInode(mFileId);
+  }
+
+  // we store the mtime.ns time in st_dev ... sigh@Xrootd ...
+#ifdef __APPLE__
+  unsigned long nsec = buf->st_mtimespec.tv_nsec;
+#else
+  unsigned long nsec = buf->st_mtim.tv_nsec;
+#endif
+  // mask for 10^9
+  nsec &= 0x7fffffff;
+  // enable bit 32 as indicator
+  nsec |= 0x80000000;
+  // overwrite st_dev
+  buf->st_dev = nsec;
+#ifdef __APPLE__
+  eos_info("path=%s inode=%lu size=%lu mtime=%lu.%lu", mNsPath.c_str(), mFileId,
+           (unsigned long) buf->st_size, buf->st_mtimespec.tv_sec,
+           buf->st_dev & 0x7ffffff);
+#else
+  eos_info("path=%s inode=%lu size=%lu mtime=%lu.%lu", mNsPath.c_str(), mFileId,
+           (unsigned long) buf->st_size, buf->st_mtim.tv_sec, buf->st_dev & 0x7ffffff);
+#endif
+  return rc;
+}
+
+//------------------------------------------------------------------------------
+// Sync file
+//------------------------------------------------------------------------------
+int
+XrdFstOfsFile::sync()
+{
+  static const int cbWaitTime = 3600;
+
+  // TPC transfer
+  if (mTpcFlag == kTpcDstSetup) {
+    XrdSysMutexHelper scope_lock(&mTpcJobMutex);
+
+    if (mTpcState == kTpcIdle) {
+      eos_info("msg=\"tpc enabled -> 1st sync\"");
+      mTpcThreadStatus = XrdSysThread::Run(&mTpcThread,
+                                           XrdFstOfsFile::StartDoTpcTransfer,
+                                           static_cast<void*>(this), XRDSYSTHREAD_HOLD,
+                                           "TPC Transfer Thread");
+
+      if (mTpcThreadStatus == 0) {
+        mTpcState = kTpcRun;
+        scope_lock.UnLock();
+        return SFS_OK;
+      } else {
+        eos_err("msg=\"failed to start TPC job thread\"");
+        mTpcState = kTpcDone;
+
+        if (mTpcInfo.Key) {
+          free(mTpcInfo.Key);
         }
+
+        mTpcInfo.Key = strdup("Copy failed, could not start job");
+        return mTpcInfo.Fail(&error, "could not start job", ECANCELED);
+      }
+    } else if (mTpcState == kTpcRun) {
+      eos_info("msg=\"tpc running -> 2nd sync\"");
+
+      if (mTpcInfo.SetCB(&error)) {
+        return SFS_ERROR;
       }
 
-      mCheckSum->GetBinChecksum(checksumlen);
-      // Copy checksum into meta data
-      fMd->mProtoFmd.set_checksum(mCheckSum->GetHexChecksum());
+      error.setErrCode(cbWaitTime);
+      mTpcInfo.Engage();
+      return SFS_STARTED;
+    } else if (mTpcState == kTpcDone) {
+      eos_info("msg=\"tpc already finished, retc=%i\"", mTpcRetc);
 
-      if (mHasWrite) {
-        // If we have no write, we don't set this attributes (xrd3cp!)
-        // set the eos checksum extended attributes
-        std::unique_ptr<eos::fst::FileIo> io(eos::fst::FileIoPlugin::GetIoObject(
-                                               mFstPath.c_str(), this));
-
-        if (((eos::common::LayoutId::GetLayoutType(mLid) ==
-              eos::common::LayoutId::kPlain) ||
-             (eos::common::LayoutId::GetLayoutType(mLid) ==
-              eos::common::LayoutId::kReplica))) {
-          // Don't put file checksum tags for complex layouts like raid6,readdp, archive
-          if (io->attrSet(std::string("user.eos.checksumtype"),
-                          std::string(mCheckSum->GetName()))) {
-            eos_err("unable to set extended attribute <eos.checksumtype> errno=%d", errno);
-          }
-
-          if (io->attrSet("user.eos.checksum", mCheckSum->GetBinChecksum(checksumlen),
-                          checksumlen)) {
-            eos_err("unable to set extended attribute <eos.checksum> errno=%d", errno);
-          }
-        }
-
-        // Reset any tagged error
-        if (io->attrSet("user.eos.filecxerror", "0")) {
-          eos_err("unable to set extended attribute <eos.filecxerror> errno=%d", errno);
-        }
-
-        if (io->attrSet("user.eos.blockcxerror", "0")) {
-          eos_err("unable to set extended attribute <eos.blockcxerror> errno=%d", errno);
-        }
+      if (mTpcRetc) {
+        error.setErrInfo(mTpcRetc, (mTpcInfo.Key ? mTpcInfo.Key : "failed tpc"));
+        return SFS_ERROR;
+      } else {
+        return SFS_OK;
       }
     } else {
-      // This is a read with checksum check, compare with fMD
-      bool isopenforwrite = gOFS.openedForWriting.isOpen(mFsId, mFileId);
+      eos_err("msg=\"unknown tpc state\"");
+      error.setErrInfo(EINVAL, "unknown TPC state");
+      return SFS_ERROR;
+    }
+  } else {
+    // Standard file sync
+    return mLayout->Sync();
+  }
+}
 
-      if (isopenforwrite) {
-        eos_info("(read)  disabling checksum check: file is currently written");
-        return false;
-      }
+//------------------------------------------------------------------------------
+// Sync AIO - no supported
+//------------------------------------------------------------------------------
+int
+XrdFstOfsFile::sync(XrdSfsAio* aiop)
+{
+  return gOFS.Emsg("sync_aio", error, ENOTSUP, "sync aio - operation not "
+                   "supported");
+}
 
-      eos_info("(read)  checksum type: %s checksum hex: %s fmd-checksum: %s",
-               mCheckSum->GetName(),
-               mCheckSum->GetHexChecksum(),
-               fMd->mProtoFmd.checksum().c_str());
-      std::string calculatedchecksum = mCheckSum->GetHexChecksum();
+//------------------------------------------------------------------------------
+// Truncate file
+//------------------------------------------------------------------------------
+int
+XrdFstOfsFile::truncate(XrdSfsFileOffset fsize)
+{
+  eos_info("openSize=%llu fsize=%llu ", openSize, fsize);
 
-      // We might fetch an unitialized value, so that is not to be considered
-      // a checksum error yet.
-      if (fMd->mProtoFmd.checksum() != "none") {
-        if (calculatedchecksum != fMd->mProtoFmd.checksum().c_str()) {
-          checksumerror = true;
-        }
+  if (mIsDevNull) {
+    return SFS_OK;
+  }
+
+  if (fsize != openSize) {
+    mHasWrite = true;
+
+    if (mCheckSum) {
+      if (fsize != mCheckSum->GetMaxOffset()) {
+        mCheckSum->Reset();
+        mCheckSum->SetDirty();
       }
     }
   }
 
-  return checksumerror;
+  return mLayout->Truncate(fsize);
 }
 
 //------------------------------------------------------------------------------
@@ -1011,9 +976,9 @@ XrdFstOfsFile::close()
     {
       XrdSysMutexHelper tpcLock(gOFS.TpcMapMutex);
 
-      if (gOFS.TpcMap[mIsTpcDst].count(mTpcKey.c_str())) {
+      if (gOFS.TpcMap[mIsTpcDst].count(mTpcKey)) {
         eos_info("msg=\"remove tpc key\" key=%s", mTpcKey.c_str());
-        gOFS.TpcMap[mIsTpcDst].erase(mTpcKey.c_str());
+        gOFS.TpcMap[mIsTpcDst].erase(mTpcKey);
 
         try {
           gOFS.TpcMap[mIsTpcDst].resize(0);
@@ -1039,40 +1004,41 @@ XrdFstOfsFile::close()
 
   // We enter the close logic only once since there can be an explicit close or
   // a close via the destructor
-  if (opened && (!closed) && fMd) {
+  if (opened && (!closed) && mFmd) {
     // Check if the file close comes from a client disconnect e.g. the destructor
     XrdOucString hexstring = "";
-    eos::common::FileId::Fid2Hex(fMd->mProtoFmd.fid(), hexstring);
+    eos::common::FileId::Fid2Hex(mFmd->mProtoFmd.fid(), hexstring);
     XrdOucErrInfo error;
     XrdOucString capOpaqueString = "/?mgm.pcmd=drop";
     XrdOucString OpaqueString = "";
     OpaqueString += "&mgm.fsid=";
-    OpaqueString += (int) fMd->mProtoFmd.fsid();
+    OpaqueString += (int) mFmd->mProtoFmd.fsid();
     OpaqueString += "&mgm.fid=";
     OpaqueString += hexstring;
     XrdOucEnv Opaque(OpaqueString.c_str());
     capOpaqueString += OpaqueString;
     eos_info("viaDelete=%d", viaDelete);
 
-    if ((viaDelete || writeDelete) && ((isCreation ||
-                                        IsChunkedUpload()) && (!mFusex))) {
+    if ((viaDelete || writeDelete) &&
+        ((isCreation || IsChunkedUpload()) && (!mFusex))) {
       // It is closed by the destructor e.g. no proper close
       // or the specified checksum does not match the computed one
       if (viaDelete) {
         eos_info("msg=\"(unpersist): deleting file\" reason=\"client disconnect\""
-                 "  fsid=%u fxid=%08x on fsid=%u", fMd->mProtoFmd.fsid(), fMd->mProtoFmd.fid());
+                 "  fsid=%u fxid=%08x on fsid=%u", mFmd->mProtoFmd.fsid(),
+                 mFmd->mProtoFmd.fid());
       }
 
       if (writeDelete) {
         eos_info("msg=\"(unpersist): deleting file\" reason=\"write/policy error\""
-                 " fsid=%u fxid=%08x on fsid=%u", fMd->mProtoFmd.fsid(), fMd->mProtoFmd.fid());
+                 " fsid=%u fxid=%08x on fsid=%u", mFmd->mProtoFmd.fsid(), mFmd->mProtoFmd.fid());
       }
 
       // Delete the file - set the file to be deleted
       deleteOnClose = true;
-      layOut->Remove();
+      mLayout->Remove();
 
-      if (layOut->IsEntryServer() && (!isReplication) && (!mIsInjection)) {
+      if (mLayout->IsEntryServer() && (!isReplication) && (!mIsInjection)) {
         capOpaqueString += "&mgm.dropall=1";
       }
 
@@ -1082,36 +1048,36 @@ XrdFstOfsFile::close()
 
       if (rc) {
         eos_warning("(unpersist): unable to drop file id %s fsid %u at manager %s",
-                    hexstring.c_str(), fMd->mProtoFmd.fid(), mCapOpaque->Get("mgm.manager"));
+                    hexstring.c_str(), mFmd->mProtoFmd.fid(), mCapOpaque->Get("mgm.manager"));
       }
     } else {
       // Check if this was a newly created file
       if (isCreation) {
         // If we had space allocation we have to truncate the allocated space to
         // the real size of the file
-        if ((strcmp(layOut->GetName(), "raiddp") == 0) ||
-            (strcmp(layOut->GetName(), "raid6") == 0) ||
-            (strcmp(layOut->GetName(), "archive") == 0)) {
+        if ((strcmp(mLayout->GetName(), "raiddp") == 0) ||
+            (strcmp(mLayout->GetName(), "raid6") == 0) ||
+            (strcmp(mLayout->GetName(), "archive") == 0)) {
           // the entry server has to truncate only if this is not a recovery action
-          if (layOut->IsEntryServer() && !mRainReconstruct) {
+          if (mLayout->IsEntryServer() && !mRainReconstruct) {
             eos_info("msg=\"truncate RAIN layout\" truncate-offset=%llu",
                      maxOffsetWritten);
-            layOut->Truncate(maxOffsetWritten);
+            mLayout->Truncate(maxOffsetWritten);
           }
         } else {
           if ((long long) maxOffsetWritten > (long long) openSize) {
             // Check if we have to deallocate something for this file transaction
             if ((mBookingSize) && (mBookingSize > (long long) maxOffsetWritten)) {
               eos_info("deallocationg %llu bytes", mBookingSize - maxOffsetWritten);
-              layOut->Truncate(maxOffsetWritten);
+              mLayout->Truncate(maxOffsetWritten);
               // We have evt. to deallocate blocks which have not been written
-              layOut->Fdeallocate(maxOffsetWritten, mBookingSize);
+              mLayout->Fdeallocate(maxOffsetWritten, mBookingSize);
             }
           }
         }
       }
 
-      checksumerror = verifychecksum();
+      checksumerror = VerifyChecksum();
       targetsizeerror = (mTargetSize) ? (mTargetSize != (off_t) maxOffsetWritten) :
                         false;
 
@@ -1126,7 +1092,7 @@ XrdFstOfsFile::close()
         }
       }
 
-      if (IsRainLayout(layOut->GetLayoutId())) {
+      if (IsRainLayout(mLayout->GetLayoutId())) {
         // For RAID-like layouts don't do this check
         targetsizeerror = false;
         minimumsizeerror = false;
@@ -1153,9 +1119,9 @@ XrdFstOfsFile::close()
         // We have a target size error, if the target size was preset and does not match!
         // Set the file to be deleted
         deleteOnClose = true;
-        layOut->Remove();
+        mLayout->Remove();
 
-        if (layOut->IsEntryServer() && (!isReplication) && (!mIsInjection)) {
+        if (mLayout->IsEntryServer() && (!isReplication) && (!mIsInjection)) {
           capOpaqueString += "&mgm.dropall=1";
         }
 
@@ -1165,14 +1131,14 @@ XrdFstOfsFile::close()
 
         if (rc) {
           eos_warning("(unpersist): unable to drop file id %s fsid %u at manager %s",
-                      hexstring.c_str(), fMd->mProtoFmd.fid(), mCapOpaque->Get("mgm.manager"));
+                      hexstring.c_str(), mFmd->mProtoFmd.fid(), mCapOpaque->Get("mgm.manager"));
         }
       }
 
       // Store the entry server information before closing the layout
       bool isEntryServer = false;
 
-      if (layOut->IsEntryServer()) {
+      if (mLayout->IsEntryServer()) {
         isEntryServer = true;
       }
 
@@ -1184,7 +1150,7 @@ XrdFstOfsFile::close()
         // Commit meta data
         struct stat statinfo;
 
-        if ((rc = layOut->Stat(&statinfo))) {
+        if ((rc = mLayout->Stat(&statinfo))) {
           rc = gOFS.Emsg(epname, this->error, EIO, "close - cannot stat closed layout"
                          " to determine file size", mNsPath.c_str());
         }
@@ -1193,43 +1159,43 @@ XrdFstOfsFile::close()
           if ((statinfo.st_size == 0) || mHasWrite) {
             // Update size
             closeSize = statinfo.st_size;
-            fMd->mProtoFmd.set_size(statinfo.st_size);
-            fMd->mProtoFmd.set_disksize(statinfo.st_size);
-            fMd->mProtoFmd.set_mgmsize(0xfffffffffff1ULL); // now again undefined
-            fMd->mProtoFmd.set_mgmchecksum(""); // now again empty
-            fMd->mProtoFmd.set_diskchecksum(""); // now again empty
-            fMd->mProtoFmd.set_layouterror(0); // reset layout errors
-            fMd->mProtoFmd.set_locations(""); // reset locations
-            fMd->mProtoFmd.set_filecxerror(0);
-            fMd->mProtoFmd.set_blockcxerror(0);
-            fMd->mProtoFmd.set_locations(""); // reset locations
-            fMd->mProtoFmd.set_filecxerror(0);
-            fMd->mProtoFmd.set_blockcxerror(0);
-            fMd->mProtoFmd.set_mtime(statinfo.st_mtime);
+            mFmd->mProtoFmd.set_size(statinfo.st_size);
+            mFmd->mProtoFmd.set_disksize(statinfo.st_size);
+            mFmd->mProtoFmd.set_mgmsize(0xfffffffffff1ULL); // now again undefined
+            mFmd->mProtoFmd.set_mgmchecksum(""); // now again empty
+            mFmd->mProtoFmd.set_diskchecksum(""); // now again empty
+            mFmd->mProtoFmd.set_layouterror(0); // reset layout errors
+            mFmd->mProtoFmd.set_locations(""); // reset locations
+            mFmd->mProtoFmd.set_filecxerror(0);
+            mFmd->mProtoFmd.set_blockcxerror(0);
+            mFmd->mProtoFmd.set_locations(""); // reset locations
+            mFmd->mProtoFmd.set_filecxerror(0);
+            mFmd->mProtoFmd.set_blockcxerror(0);
+            mFmd->mProtoFmd.set_mtime(statinfo.st_mtime);
 #ifdef __APPLE__
-            fMd->mProtoFmd.set_mtime_ns(0);
+            mFmd->mProtoFmd.set_mtime_ns(0);
 #else
-            fMd->mProtoFmd.set_mtime_ns(statinfo.st_mtim.tv_nsec);
+            mFmd->mProtoFmd.set_mtime_ns(statinfo.st_mtim.tv_nsec);
 #endif
             // Set the container id
-            fMd->mProtoFmd.set_cid(mCid);
+            mFmd->mProtoFmd.set_cid(mCid);
 
             // For replicat's set the original uid/gid/lid values
             if (mCapOpaque->Get("mgm.source.lid")) {
-              fMd->mProtoFmd.set_lid(strtoul(mCapOpaque->Get("mgm.source.lid"), 0, 10));
+              mFmd->mProtoFmd.set_lid(strtoul(mCapOpaque->Get("mgm.source.lid"), 0, 10));
             }
 
             if (mCapOpaque->Get("mgm.source.ruid")) {
-              fMd->mProtoFmd.set_uid(atoi(mCapOpaque->Get("mgm.source.ruid")));
+              mFmd->mProtoFmd.set_uid(atoi(mCapOpaque->Get("mgm.source.ruid")));
             }
 
             if (mCapOpaque->Get("mgm.source.rgid")) {
-              fMd->mProtoFmd.set_gid(atoi(mCapOpaque->Get("mgm.source.rgid")));
+              mFmd->mProtoFmd.set_gid(atoi(mCapOpaque->Get("mgm.source.rgid")));
             }
 
             // Commit local
             try {
-              if (!gFmdDbMapHandler.Commit(fMd)) {
+              if (!gFmdDbMapHandler.Commit(mFmd.get())) {
                 eos_err("unabel to commit meta data to local database");
                 (void) gOFS.Emsg(epname, this->error, EIO, "close - unable to "
                                  "commit meta data", mNsPath.c_str());
@@ -1245,7 +1211,7 @@ XrdFstOfsFile::close()
             capOpaqueFile += "&mgm.pcmd=commit";
             capOpaqueFile += "&mgm.size=";
             char filesize[1024];
-            sprintf(filesize, "%" PRIu64 "", fMd->mProtoFmd.size());
+            sprintf(filesize, "%li", (int64_t)mFmd->mProtoFmd.size());
             capOpaqueFile += filesize;
 
             if (mCheckSum) {
@@ -1256,11 +1222,11 @@ XrdFstOfsFile::close()
             capOpaqueFile += "&mgm.mtime=";
             capOpaqueFile += eos::common::StringConversion::GetSizeString(mTimeString,
                              (mForcedMtime != 1) ? mForcedMtime : (unsigned long long)
-                             fMd->mProtoFmd.mtime());
+                             mFmd->mProtoFmd.mtime());
             capOpaqueFile += "&mgm.mtime_ns=";
             capOpaqueFile += eos::common::StringConversion::GetSizeString(mTimeString,
                              (mForcedMtime != 1) ? mForcedMtime_ms : (unsigned long long)
-                             fMd->mProtoFmd.mtime_ns());
+                             mFmd->mProtoFmd.mtime_ns());
 
             if (mFusex) {
               capOpaqueFile += "&mgm.fusex=1";
@@ -1271,7 +1237,7 @@ XrdFstOfsFile::close()
             }
 
             capOpaqueFile += "&mgm.add.fsid=";
-            capOpaqueFile += (int) fMd->mProtoFmd.fsid();
+            capOpaqueFile += (int) mFmd->mProtoFmd.fsid();
 
             // If <drainfsid> is set, we can issue a drop replica
             if (mCapOpaque->Get("mgm.drainfsid")) {
@@ -1324,28 +1290,28 @@ XrdFstOfsFile::close()
                   // unlink that immediately
                   eos_info("info=\"unlinking fid=%08x path=%s - "
                            "file has been already unlinked from the namespace\"",
-                           fMd->mProtoFmd.fid(), mNsPath.c_str());
+                           mFmd->mProtoFmd.fid(), mNsPath.c_str());
                   mFusexIsUnlinked = true;
                 }
 
                 if (error.getErrInfo() == EBADE) {
                   eos_err("info=\"unlinking fid=%08x path=%s - "
                           "file size of replica does not match reference\"",
-                          fMd->mProtoFmd.fid(), mNsPath.c_str());
+                          mFmd->mProtoFmd.fid(), mNsPath.c_str());
                   consistencyerror = true;
                 }
 
                 if (error.getErrInfo() == EBADR) {
                   eos_err("info=\"unlinking fid=%08x path=%s - "
                           "checksum of replica does not match reference\"",
-                          fMd->mProtoFmd.fid(), mNsPath.c_str());
+                          mFmd->mProtoFmd.fid(), mNsPath.c_str());
                   consistencyerror = true;
                 }
 
                 if (error.getErrInfo() == EREMCHG) {
                   eos_err("info=\"unlinking fid=%08x path=%s - "
                           "overlapping atomic upload - discarding this one\"",
-                          fMd->mProtoFmd.fid(), mNsPath.c_str());
+                          mFmd->mProtoFmd.fid(), mNsPath.c_str());
                   atomicoverlap = true;
                 }
 
@@ -1379,28 +1345,29 @@ XrdFstOfsFile::close()
           // use inode + checksum
           char setag[256];
           snprintf(setag, sizeof(setag) - 1, "\"%llu:%s\"",
-                   eos::common::FileId::FidToInode((unsigned long long) fMd->mProtoFmd.fid()),
-                   fMd->mProtoFmd.checksum().c_str());
+                   eos::common::FileId::FidToInode((unsigned long long) mFmd->mProtoFmd.fid()),
+                   mFmd->mProtoFmd.checksum().c_str());
           mEtag = setag;
         } else {
           // use checksum, S3 wants the pure MD5
           char setag[256];
-          snprintf(setag, sizeof(setag) - 1, "\"%s\"", fMd->mProtoFmd.checksum().c_str());
+          snprintf(setag, sizeof(setag) - 1, "\"%s\"",
+                   mFmd->mProtoFmd.checksum().c_str());
           mEtag = setag;
         }
       } else {
         // use inode + mtime
         char setag[256];
         snprintf(setag, sizeof(setag) - 1, "\"%llu:%llu\"",
-                 eos::common::FileId::FidToInode((unsigned long long) fMd->mProtoFmd.fid()),
-                 (unsigned long long) fMd->mProtoFmd.mtime());
+                 eos::common::FileId::FidToInode((unsigned long long) mFmd->mProtoFmd.fid()),
+                 (unsigned long long) mFmd->mProtoFmd.mtime());
         mEtag = setag;
       }
     }
     int closerc = 0; // return of the close
     brc = rc; // return before the close
-    rc |= modified();
-    closerc = layOut->Close();
+    rc |= ModifiedWhileInUse();
+    closerc = mLayout->Close();
     rc |= closerc;
     closed = true;
 
@@ -1408,11 +1375,11 @@ XrdFstOfsFile::close()
       // For RAIN layouts if there is an error on close when writing then we
       // delete the whole file. If we do RAIN reconstruction we cleanup this
       // local replica which was not committed.
-      if ((eos::common::LayoutId::GetLayoutType(layOut->GetLayoutId()) ==
+      if ((eos::common::LayoutId::GetLayoutType(mLayout->GetLayoutId()) ==
            eos::common::LayoutId::kRaidDP) ||
-          (eos::common::LayoutId::GetLayoutType(layOut->GetLayoutId()) ==
+          (eos::common::LayoutId::GetLayoutType(mLayout->GetLayoutId()) ==
            eos::common::LayoutId::kRaid6) ||
-          (eos::common::LayoutId::GetLayoutType(layOut->GetLayoutId()) ==
+          (eos::common::LayoutId::GetLayoutType(mLayout->GetLayoutId()) ==
            eos::common::LayoutId::kArchive)) {
         deleteOnClose = true;
       } else {
@@ -1428,22 +1395,22 @@ XrdFstOfsFile::close()
 
       if (isRW) {
         if ((mIsInjection || isCreation || IsChunkedUpload()) && (!rc) &&
-            (gOFS.openedForWriting.getUseCount(fMd->mProtoFmd.fsid(),
-                                               fMd->mProtoFmd.fid() > 1))) {
+            (gOFS.openedForWriting.getUseCount(mFmd->mProtoFmd.fsid(),
+                                               mFmd->mProtoFmd.fid() > 1))) {
           // indicate that this file was closed properly and disable further delete on close
-          gOFS.WNoDeleteOnCloseFid[fMd->mProtoFmd.fsid()][fMd->mProtoFmd.fid()] = true;
+          gOFS.WNoDeleteOnCloseFid[mFmd->mProtoFmd.fsid()][mFmd->mProtoFmd.fid()] = true;
         }
 
-        gOFS.openedForWriting.down(fMd->mProtoFmd.fsid(), fMd->mProtoFmd.fid());
+        gOFS.openedForWriting.down(mFmd->mProtoFmd.fsid(), mFmd->mProtoFmd.fid());
       } else {
-        gOFS.openedForReading.down(fMd->mProtoFmd.fsid(), fMd->mProtoFmd.fid());
+        gOFS.openedForReading.down(mFmd->mProtoFmd.fsid(), mFmd->mProtoFmd.fid());
       }
 
-      if (!gOFS.openedForWriting.isOpen(fMd->mProtoFmd.fsid(),
-                                        fMd->mProtoFmd.fid())) {
+      if (!gOFS.openedForWriting.isOpen(mFmd->mProtoFmd.fsid(),
+                                        mFmd->mProtoFmd.fid())) {
         // When the last writer is gone we can remove the prohibiting entry
-        gOFS.WNoDeleteOnCloseFid[fMd->mProtoFmd.fsid()].erase(fMd->mProtoFmd.fid());
-        gOFS.WNoDeleteOnCloseFid[fMd->mProtoFmd.fsid()].resize(0);
+        gOFS.WNoDeleteOnCloseFid[mFmd->mProtoFmd.fsid()].erase(mFmd->mProtoFmd.fid());
+        gOFS.WNoDeleteOnCloseFid[mFmd->mProtoFmd.fsid()].resize(0);
       }
     }
 
@@ -1465,7 +1432,7 @@ XrdFstOfsFile::close()
       if (isRW) {
         // Store in the WrittenFilesQueue
         gOFS.WrittenFilesQueueMutex.Lock();
-        gOFS.WrittenFilesQueue.push(fMd->mProtoFmd);
+        gOFS.WrittenFilesQueue.push(mFmd->mProtoFmd);
         gOFS.WrittenFilesQueueMutex.UnLock();
       }
     }
@@ -1524,7 +1491,7 @@ XrdFstOfsFile::close()
         OpaqueString += hexstring;
 
         // If deleteOnClose at the gateway then we drop all replicas
-        if (layOut->IsEntryServer() && (!isReplication) && (!mIsInjection)) {
+        if (mLayout->IsEntryServer() && (!isReplication) && (!mIsInjection)) {
           OpaqueString += "&mgm.dropall=1";
         }
 
@@ -1669,7 +1636,7 @@ XrdFstOfsFile::close()
                   "due to missing replicas", mCapOpaque->Get("mgm.path"));
     }
 
-    if (!rc && (mEventOnClose || mSyncEventOnClose) && layOut->IsEntryServer()) {
+    if (!rc && (mEventOnClose || mSyncEventOnClose) && mLayout->IsEntryServer()) {
       //trigger an MGM event if asked from the entry point
       XrdOucString capOpaqueFile = "";
       XrdOucString eventType = "";
@@ -1699,7 +1666,7 @@ XrdFstOfsFile::close()
             eos::common::WF_CUSTOM_ATTRIBUTES_TO_FST_EQUALS,
             eos::common::WF_CUSTOM_ATTRIBUTES_TO_FST_SEPARATOR, nullptr);
         std::string errMsgBackFromWfEndpoint;
-        const int notifyRc = NotifyProtoWfEndPointClosew(fMd->mProtoFmd, mEventOwner,
+        const int notifyRc = NotifyProtoWfEndPointClosew(mFmd->mProtoFmd, mEventOwner,
                              mEventOwnerGroup,
                              mEventRequestor, mEventRequestorGroup,
                              mEventInstance, mCapOpaque->Get("mgm.path"),
@@ -1711,7 +1678,7 @@ XrdFstOfsFile::close()
           eos_info("Return code rc=%i errc=%d", SFS_OK, error.getErrInfo());
           return SFS_OK;
         } else {
-          if (SendArchiveFailedToManager(fMd->mProtoFmd.fid(),
+          if (SendArchiveFailedToManager(mFmd->mProtoFmd.fid(),
                                          errMsgBackFromWfEndpoint)) {
             eos_crit("msg=\"Failed to send archive failed event to manager\" "
                      "errMsgBackFromWfEndpoint=\"%s\"",
@@ -1775,7 +1742,62 @@ XrdFstOfsFile::close()
 }
 
 //------------------------------------------------------------------------------
-// Read - low level ofs method which is called from one of the layout plugins
+// Implementation dependant commands
+//------------------------------------------------------------------------------
+int
+XrdFstOfsFile::fctl(const int cmd, int alen, const char* args,
+                    const XrdSecEntity* client)
+{
+  eos_debug("cmd=%i, args=%s", cmd, args);
+
+  if (cmd == SFS_FCTL_SPEC1) {
+    if (strncmp(args, "delete", alen) == 0) {
+      eos_warning("Setting deletion flag for file %s", mFstPath.c_str());
+      // This indicates to delete the file during the close operation
+      viaDelete = true;
+      return SFS_OK;
+    } else if (strncmp(args, "nochecksum", alen) == 0) {
+      int retc = SFS_OK;
+      eos_warning("Setting nochecksum flag for file %s", mFstPath.c_str());
+      mCheckSum.reset(nullptr);
+
+      // Propagate command to all the replicas/stripes
+      if (mLayout) {
+        retc = mLayout->Fctl(std::string(args), client);
+      }
+
+      return retc;
+    }
+  }
+
+  error.setErrInfo(ENOTSUP, "fctl command not supported");
+  return SFS_ERROR;
+}
+
+//------------------------------------------------------------------------------
+// Low-level open calling the default XrdOfs plugin
+//------------------------------------------------------------------------------
+int
+XrdFstOfsFile::openofs(const char* path,
+                       XrdSfsFileOpenMode open_mode,
+                       mode_t create_mode,
+                       const XrdSecEntity* client,
+                       const char* opaque)
+{
+  int retc = 0;
+
+  while ((retc = XrdOfsFile::open(path, open_mode, create_mode, client,
+                                  opaque)) > 0) {
+    eos_static_notice("msg\"xrootd-lock-table busy - snoozing & retry\" "
+                      "delay=%d errno=%d", retc, errno);
+    std::this_thread::sleep_for(std::chrono::seconds(retc));
+  }
+
+  return retc;
+}
+
+//------------------------------------------------------------------------------
+// Low-level read calling the default XrdOfs plugin
 //------------------------------------------------------------------------------
 XrdSfsXferSize
 XrdFstOfsFile::readofs(XrdSfsFileOffset fileOffset, char* buffer,
@@ -1817,7 +1839,7 @@ XrdFstOfsFile::readofs(XrdSfsFileOffset fileOffset, char* buffer,
   }
 
   if (rc > 0) {
-    if (layOut->IsEntryServer() || IsRainLayout(mLid)) {
+    if (mLayout->IsEntryServer() || IsRainLayout(mLid)) {
       XrdSysMutexHelper vecLock(vecMutex);
       rvec.push_back(rc);
     }
@@ -1831,86 +1853,7 @@ XrdFstOfsFile::readofs(XrdSfsFileOffset fileOffset, char* buffer,
 }
 
 //------------------------------------------------------------------------------
-// Read method
-//------------------------------------------------------------------------------
-int
-XrdFstOfsFile::read(XrdSfsFileOffset fileOffset, XrdSfsXferSize amount)
-{
-  int rc = XrdOfsFile::read(fileOffset, amount);
-  eos_debug("rc=%d offset=%lu size=%llu", rc, fileOffset, amount);
-  return rc;
-}
-
-//------------------------------------------------------------------------------
-// Read
-//------------------------------------------------------------------------------
-XrdSfsXferSize
-XrdFstOfsFile::read(XrdSfsFileOffset fileOffset, char* buffer,
-                    XrdSfsXferSize buffer_size)
-{
-  eos_debug("fileOffset=%lli, buffer_size=%i", fileOffset, buffer_size);
-
-  //  EPNAME("read");
-  if (mTpcFlag == kTpcSrcRead) {
-    if (!(rCalls % 10)) {
-      if (!TpcValid()) {
-        eos_err("msg=\"tcp interrupted by control-c - cancel tcp read\" key=%s",
-                mTpcKey.c_str());
-        return gOFS.Emsg("read", error, EINTR, "read - tpc transfer interrupted"
-                         " by client disconnect", FName());
-      }
-    }
-  }
-
-  int rc = layOut->Read(fileOffset, buffer, buffer_size);
-  eos_debug("layout read %d checkSum %d", rc, mCheckSum.get());
-
-  if ((rc > 0) && (mCheckSum)) {
-    XrdSysMutexHelper cLock(ChecksumMutex);
-    mCheckSum->Add(buffer, static_cast<size_t>(rc),
-                   static_cast<off_t>(fileOffset));
-  }
-
-  if (rc > 0) {
-    rOffset = fileOffset + rc;
-  }
-
-  gettimeofday(&lrTime, &tz);
-  AddReadTime();
-
-  if (rc < 0) {
-    // Here we might take some other action
-    int envlen = 0;
-    eos_crit("block-read error=%d offset=%llu len=%llu file=%s",
-             error.getErrInfo(),
-             static_cast<unsigned long long>(fileOffset),
-             static_cast<unsigned long long>(buffer_size),
-             FName(), mCapOpaque ? mCapOpaque->Env(envlen) : FName());
-    // Used to understand if a reconstruction of a RAIN file worked
-    hasReadError = true;
-  }
-
-  eos_debug("rc=%d offset=%lu size=%llu", rc, fileOffset,
-            static_cast<unsigned long long>(buffer_size));
-
-  if ((fileOffset + buffer_size) >= openSize) {
-    if (mCheckSum) {
-      if (!mCheckSum->NeedsRecalculation()) {
-        // If this is the last read of sequential reading, we can verify the checksum now
-        if (verifychecksum()) {
-          return gOFS.Emsg("read", error, EIO, "read file - wrong file checksum fn=",
-                           FName());
-        }
-      }
-    }
-  }
-
-  return rc;
-}
-
-//------------------------------------------------------------------------------
-// Vector read - low level ofs method which is called from one of the
-// layout plugins
+// Low-level vector read calling the default XrdOfs plugin
 //------------------------------------------------------------------------------
 XrdSfsXferSize
 XrdFstOfsFile::readvofs(XrdOucIOVec* readV, uint32_t readCount)
@@ -1936,38 +1879,7 @@ XrdFstOfsFile::readvofs(XrdOucIOVec* readV, uint32_t readCount)
 }
 
 //------------------------------------------------------------------------------
-// Vector read - OFS interface method
-//------------------------------------------------------------------------------
-XrdSfsXferSize
-XrdFstOfsFile::readv(XrdOucIOVec* readV, int readCount)
-{
-  eos_debug("read count=%i", readCount);
-  // Copy the XrdOucIOVec structure to XrdCl::ChunkList
-  uint32_t total_read = 0;
-  XrdCl::ChunkList chunkList;
-  chunkList.reserve(readCount);
-
-  for (int i = 0; i < readCount; ++i) {
-    total_read += (uint32_t)readV[i].size;
-    chunkList.push_back(XrdCl::ChunkInfo((uint64_t)readV[i].offset,
-                                         (uint32_t)readV[i].size,
-                                         (void*)readV[i].data));
-  }
-
-  return layOut->ReadV(chunkList, total_read);
-}
-
-//------------------------------------------------------------------------------
-// Read AIO
-//------------------------------------------------------------------------------
-int
-XrdFstOfsFile::read(XrdSfsAio* aioparm)
-{
-  return SFS_ERROR;
-}
-
-//------------------------------------------------------------------------------
-// Write to OFS file
+// Low-level write calling the default XrdOfs plugin
 //------------------------------------------------------------------------------
 XrdSfsXferSize
 XrdFstOfsFile::writeofs(XrdSfsFileOffset fileOffset, const char* buffer,
@@ -2047,7 +1959,7 @@ XrdFstOfsFile::writeofs(XrdSfsFileOffset fileOffset, const char* buffer,
   }
 
   if (rc > 0) {
-    if (layOut->IsEntryServer() || IsRainLayout(mLid)) {
+    if (mLayout->IsEntryServer() || IsRainLayout(mLid)) {
       XrdSysMutexHelper lock(vecMutex);
       wvec.push_back(rc);
     }
@@ -2061,130 +1973,7 @@ XrdFstOfsFile::writeofs(XrdSfsFileOffset fileOffset, const char* buffer,
 }
 
 //------------------------------------------------------------------------------
-// Write
-//------------------------------------------------------------------------------
-XrdSfsXferSize
-XrdFstOfsFile::write(XrdSfsFileOffset fileOffset, const char* buffer,
-                     XrdSfsXferSize buffer_size)
-{
-  if (mIsDevNull) {
-    eos_debug("offset=%llu, length=%li discarded for sink file", fileOffset,
-              buffer_size);
-    maxOffsetWritten = fileOffset + buffer_size;
-    return buffer_size;
-  }
-
-  int rc = layOut->Write(fileOffset, const_cast<char*>(buffer), buffer_size);
-
-  // If we see a remote IO error, we don't fail, we just call repair afterwards,
-  // only for replica layouts
-  if ((rc < 0) && isCreation &&
-      (layOut->GetErrObj()->getErrInfo() == EREMOTEIO) &&
-      (eos::common::LayoutId::GetLayoutType(mLid) ==
-       eos::common::LayoutId::kReplica)) {
-    repairOnClose = true;
-    rc = buffer_size;
-  }
-
-  // Evt. add checksum
-  if (rc > 0) {
-    if (mCheckSum) {
-      XrdSysMutexHelper cLock(ChecksumMutex);
-      mCheckSum->Add(buffer, static_cast<size_t>(rc),
-                     static_cast<off_t>(fileOffset));
-    }
-
-    if (static_cast<unsigned long long>(fileOffset + buffer_size) >
-        static_cast<unsigned long long>(maxOffsetWritten)) {
-      maxOffsetWritten = (fileOffset + buffer_size);
-    }
-  }
-
-  mHasWrite = true;
-  eos_debug("rc=%d offset=%lu size=%lu", rc, fileOffset,
-            static_cast<unsigned long>(buffer_size));
-
-  if (rc < 0) {
-    int envlen = 0;
-
-    if (!hasWriteError || EOS_LOGS_DEBUG) {
-      eos_crit("block-write error=%d offset=%llu len=%llu file=%s",
-               layOut->GetErrObj()->getErrInfo(),
-               static_cast<unsigned long long>(fileOffset),
-               static_cast<unsigned long long>(buffer_size),
-               FName(), mCapOpaque ? mCapOpaque->Env(envlen) : FName());
-    }
-
-    hasWriteError = true;
-  }
-
-  if (rc < 0) {
-    int envlen = 0;
-    // Indicate the deletion flag for write errors
-    writeDelete = true;
-    XrdOucString errdetail;
-
-    if (isCreation) {
-      XrdOucString newerr;
-      // Add to the error message that this file has been removed after the error,
-      // which happens for creations
-      newerr = error.getErrText();
-
-      if (writeErrorFlag == kOfsSimulatedIoError) {
-        // Simulated IO error
-        errdetail += " => file has been removed because of a simulated IO error";
-      } else {
-        if (writeErrorFlag == kOfsDiskFullError) {
-          // Disk full error
-          errdetail +=
-            " => file has been removed because the target filesystem  was full";
-        } else {
-          if (writeErrorFlag == kOfsMaxSizeError) {
-            // Maximum file size error
-            errdetail += " => file has been removed because the maximum target "
-                         "filesize defined for that subtree was exceeded (maxsize=";
-            char smaxsize[16];
-            snprintf(smaxsize, sizeof(smaxsize) - 1, "%llu", (unsigned long long) mMaxSize);
-            errdetail += smaxsize;
-            errdetail += " bytes)";
-          } else {
-            if (writeErrorFlag == kOfsIoError) {
-              // Generic IO error
-              errdetail +=
-                " => file has been removed due to an IO error on the target filesystem";
-            } else {
-              errdetail += " => file has been removed due to an IO error (unspecified)";
-            }
-          }
-        }
-      }
-
-      newerr += errdetail.c_str();
-      error.setErrInfo(error.getErrInfo(), newerr.c_str());
-    }
-
-    eos_err("block-write error=%d offset=%llu len=%llu file=%s error=\"%s\"",
-            error.getErrInfo(),
-            (unsigned long long) fileOffset,
-            (unsigned long long) buffer_size, FName(),
-            mCapOpaque ? mCapOpaque->Env(envlen) : FName(),
-            errdetail.c_str());
-  }
-
-  return rc;
-}
-
-//------------------------------------------------------------------------------
-// Write AIO
-//------------------------------------------------------------------------------
-int
-XrdFstOfsFile::write(XrdSfsAio* aioparm)
-{
-  return SFS_ERROR;
-}
-
-//------------------------------------------------------------------------------
-// Sync OFS
+// Low-level sync calling the default XrdOfs plugin
 //------------------------------------------------------------------------------
 int
 XrdFstOfsFile::syncofs()
@@ -2193,243 +1982,7 @@ XrdFstOfsFile::syncofs()
 }
 
 //------------------------------------------------------------------------------
-// Verify if a TPC key is still valid
-//------------------------------------------------------------------------------
-bool
-XrdFstOfsFile::TpcValid()
-{
-  XrdSysMutexHelper scope_lock(gOFS.TpcMapMutex);
-
-  if (mTpcKey.length() &&  gOFS.TpcMap[mIsTpcDst].count(mTpcKey.c_str())) {
-    return true;
-  }
-
-  return false;
-}
-
-//------------------------------------------------------------------------------
-// Sync file
-//------------------------------------------------------------------------------
-int
-XrdFstOfsFile::sync()
-{
-  static const int cbWaitTime = 3600;
-
-  // TPC transfer
-  if (mTpcFlag == kTpcDstSetup) {
-    XrdSysMutexHelper scope_lock(&mTpcJobMutex);
-
-    if (mTpcState == kTpcIdle) {
-      eos_info("msg=\"tpc enabled -> 1st sync\"");
-      mTpcThreadStatus = XrdSysThread::Run(&mTpcThread,
-                                           XrdFstOfsFile::StartDoTpcTransfer,
-                                           static_cast<void*>(this), XRDSYSTHREAD_HOLD,
-                                           "TPC Transfer Thread");
-
-      if (mTpcThreadStatus == 0) {
-        mTpcState = kTpcRun;
-        scope_lock.UnLock();
-        return SFS_OK;
-      } else {
-        eos_err("msg=\"failed to start TPC job thread\"");
-        mTpcState = kTpcDone;
-
-        if (mTpcInfo.Key) {
-          free(mTpcInfo.Key);
-        }
-
-        mTpcInfo.Key = strdup("Copy failed, could not start job");
-        return mTpcInfo.Fail(&error, "could not start job", ECANCELED);
-      }
-    } else if (mTpcState == kTpcRun) {
-      eos_info("msg=\"tpc running -> 2nd sync\"");
-
-      if (mTpcInfo.SetCB(&error)) {
-        return SFS_ERROR;
-      }
-
-      error.setErrCode(cbWaitTime);
-      mTpcInfo.Engage();
-      return SFS_STARTED;
-    } else if (mTpcState == kTpcDone) {
-      eos_info("msg=\"tpc already finished, retc=%i\"", mTpcRetc);
-
-      if (mTpcRetc) {
-        error.setErrInfo(mTpcRetc, (mTpcInfo.Key ? mTpcInfo.Key : "failed tpc"));
-        return SFS_ERROR;
-      } else {
-        return SFS_OK;
-      }
-    } else {
-      eos_err("msg=\"unknown tpc state\"");
-      error.setErrInfo(EINVAL, "unknown TPC state");
-      return SFS_ERROR;
-    }
-  } else {
-    // Standard file sync
-    return layOut->Sync();
-  }
-}
-
-//------------------------------------------------------------------------------
-// Sync
-//------------------------------------------------------------------------------
-int
-XrdFstOfsFile::sync(XrdSfsAio* aiop)
-{
-  return layOut->Sync();
-}
-
-//----------------------------------------------------------------------------
-// Static method used to start an asynchronous thread which is doing the TPC
-// transfer
-//----------------------------------------------------------------------------
-void*
-XrdFstOfsFile::StartDoTpcTransfer(void* arg)
-{
-  return reinterpret_cast<XrdFstOfsFile*>(arg)->DoTpcTransfer();
-}
-
-//------------------------------------------------------------------------------
-// Run method for the thread doing the TPC transfer
-//------------------------------------------------------------------------------
-void*
-XrdFstOfsFile::DoTpcTransfer()
-{
-  eos_info("msg=\"tpc now running - 1st sync\"");
-  std::string src_url = "";
-  std::string src_cgi = "";
-
-  // The sync initiates the third party copy
-  if (!TpcValid()) {
-    eos_err("msg=\"tpc session invalidated during sync\"");
-    XrdSysMutexHelper scope_lock(mTpcJobMutex);
-    mTpcState = kTpcDone;
-    mTpcRetc = ECONNABORTED;
-    mTpcInfo.Reply(SFS_ERROR, ECONNABORTED, "sync TPC session closed by "
-                   "disconnect");
-    return 0;
-  }
-
-  {
-    XrdSysMutexHelper tpcLock(gOFS.TpcMapMutex);
-    // Construct the source URL
-    src_url = "root://";
-    src_url += gOFS.TpcMap[mIsTpcDst][mTpcKey.c_str()].src;
-    src_url += "/";
-    src_url += gOFS.TpcMap[mIsTpcDst][mTpcKey.c_str()].lfn;
-    src_url += "?fst.readahead=true";
-    src_cgi = "tpc.key=";
-    src_cgi += mTpcKey.c_str();
-    src_cgi += "&tpc.org=";
-    src_cgi += gOFS.TpcMap[mIsTpcDst][mTpcKey.c_str()].org;
-  }
-
-  XrdIo tpcIO(src_url);
-  tpcIO.SetLogId(logId);
-  eos_info("sync-url=%s sync-cgi=%s", src_url.c_str(), src_cgi.c_str());
-
-  if (tpcIO.fileOpen(0, 0, src_cgi)) {
-    eos_err("msg=\"TPC open failed for url=%s cgi=%s\"", src_url.c_str(),
-            src_cgi.c_str());
-    XrdSysMutexHelper scope_lock(mTpcJobMutex);
-    mTpcState = kTpcDone;
-    mTpcRetc = EFAULT;
-    mTpcInfo.Reply(SFS_ERROR, EFAULT,
-                   SSTR("sync - TPC open failed for src_url=" << src_url).c_str());
-    return 0;
-  }
-
-  if (!TpcValid()) {
-    tpcIO.fileClose();
-    eos_err("msg=\"tpc session invalidated during sync\"");
-    XrdSysMutexHelper scope_lock(mTpcJobMutex);
-    mTpcState = kTpcDone;
-    mTpcRetc = ECONNABORTED;
-    mTpcInfo.Reply(SFS_ERROR, ECONNABORTED,
-                   SSTR("sync - TPC session closed by disconnect src_url="
-                        << src_url).c_str());
-    return 0;
-  }
-
-  int64_t rbytes = 0;
-  int64_t wbytes = 0;
-  off_t offset = 0;
-  constexpr uint64_t eight_gb = 8 * (2 ^ 30);
-  std::unique_ptr< std::vector<char> > buffer(
-    new std::vector<char>(tpcIO.GetBlockSize()));
-  eos_info("msg=\"tpc pull\" ");
-
-  do {
-    // Read the remote file in chunks and check after each chunk if the TPC
-    // has been aborted already
-    // @note this way of reading asynchronously in the buffer without waiting
-    // for the async requests works properly only if readahead is enabled.
-    // Otherwise, one must call fileWaitAsyncIO().
-    rbytes = tpcIO.fileReadAsync(offset, &((*buffer)[0]),
-                                 tpcIO.GetBlockSize(), true, 30);
-    eos_debug("msg=\"tpc read\" rbytes=%lli request=%llu",
-              rbytes, tpcIO.GetBlockSize());
-
-    if (rbytes == -1) {
-      (void) tpcIO.fileClose();
-      eos_err("msg=\"tpc transfer terminated - remote read failed\"");
-      XrdSysMutexHelper scope_lock(mTpcJobMutex);
-      mTpcState = kTpcDone;
-      mTpcRetc = EIO;
-      mTpcInfo.Reply(SFS_ERROR, EIO,
-                     SSTR("sync - TPC remote read failed src_url="
-                          << src_url).c_str());
-      return 0;
-    }
-
-    if (rbytes > 0) {
-      // Write the buffer out through the local object
-      wbytes = write(offset, &((*buffer)[0]), rbytes);
-      eos_debug("msg=\"tpc write\" wbytes=%llu", wbytes);
-
-      if (offset / eight_gb != (offset + rbytes) /  eight_gb) {
-        eos_info("msg=\"tcp write\" offset=%llu", offset);
-      }
-
-      if (rbytes != wbytes) {
-        (void) tpcIO.fileClose();
-        eos_err("msg=\"tpc transfer terminated - local write failed\"");
-        XrdSysMutexHelper scope_lock(mTpcJobMutex);
-        mTpcState = kTpcDone;
-        mTpcRetc = EIO;
-        mTpcInfo.Reply(SFS_ERROR, EIO, "sync - TPC local write failed");
-        return 0;
-      }
-
-      offset += rbytes;
-    }
-
-    // Check validity of the TPC key
-    if (!TpcValid()) {
-      (void) tpcIO.fileClose();
-      eos_err("msg=\"tpc transfer invalidated during sync\"");
-      XrdSysMutexHelper scope_lock(mTpcJobMutex);
-      mTpcState = kTpcDone;
-      mTpcRetc = ECONNABORTED;
-      mTpcInfo.Reply(SFS_ERROR, ECONNABORTED, "sync - TPC session closed "
-                     "by diconnect");
-      return 0;
-    }
-  } while (rbytes > 0);
-
-  // Close the remote file
-  eos_info("msg=\"done tpc transfer, close remote file\" src_url=%s",
-           src_url.c_str());
-  XrdCl::XRootDStatus st = tpcIO.fileClose();
-  XrdSysMutexHelper scope_lock(mTpcJobMutex);
-  mTpcState = kTpcDone;
-  mTpcInfo.Reply(SFS_OK, 0, "");
-  return 0;
-}
-
-//------------------------------------------------------------------------------
-// Truncate - low level ofs method which is called from one of the layout plugin
+// Low-level truncate calling the default XrdOfs plugin
 //------------------------------------------------------------------------------
 int
 XrdFstOfsFile::truncateofs(XrdSfsFileOffset fileOffset)
@@ -2452,199 +2005,40 @@ XrdFstOfsFile::truncateofs(XrdSfsFileOffset fileOffset)
 }
 
 //------------------------------------------------------------------------------
-// Truncate method
+// Low-level close calling the default XrdOfs plugin
 //------------------------------------------------------------------------------
 int
-XrdFstOfsFile::truncate(XrdSfsFileOffset fileOffset)
+XrdFstOfsFile::closeofs()
 {
-  eos_info("openSize=%llu fileOffset=%llu ", openSize, fileOffset);
-
-  if (mIsDevNull) {
-    return SFS_OK;
-  }
-
-  if (fileOffset != openSize) {
-    mHasWrite = true;
-
-    if (mCheckSum) {
-      if (fileOffset != mCheckSum->GetMaxOffset()) {
-        mCheckSum->Reset();
-        mCheckSum->SetDirty();
-      }
-    }
-  }
-
-  return layOut->Truncate(fileOffset);
-}
-
-//------------------------------------------------------------------------------
-// Stat file
-//------------------------------------------------------------------------------
-int
-XrdFstOfsFile::stat(struct stat* buf)
-{
-  EPNAME("stat");
-  int rc = SFS_OK;
-
-  if (mIsDevNull) {
-    buf->st_size = maxOffsetWritten;
-    return rc;
-  }
-
-  if (mRainReconstruct) {
-    buf->st_size = mRainSize;
-    return rc;
-  }
-
-  if (layOut) {
-    if ((rc = layOut->Stat(buf)))
-      rc = gOFS.Emsg(epname, error, EIO, "stat - cannot stat layout to determine"
-                     " file size ", mNsPath.c_str());
-  } else {
-    rc = gOFS.Emsg(epname, error, ENXIO, "stat - no layout to determine file size ",
-                   mNsPath.c_str());
-  }
-
-  // store the file id as inode number
-  if (!rc) {
-    buf->st_ino = eos::common::FileId::FidToInode(mFileId);
-  }
-
-  // we store the mtime.ns time in st_dev ... sigh@Xrootd ...
-#ifdef __APPLE__
-  unsigned long nsec = buf->st_mtimespec.tv_nsec;
-#else
-  unsigned long nsec = buf->st_mtim.tv_nsec;
-#endif
-  // mask for 10^9
-  nsec &= 0x7fffffff;
-  // enable bit 32 as indicator
-  nsec |= 0x80000000;
-  // overwrite st_dev
-  buf->st_dev = nsec;
-#ifdef __APPLE__
-  eos_info("path=%s inode=%lu size=%lu mtime=%lu.%lu", mNsPath.c_str(), mFileId,
-           (unsigned long) buf->st_size, buf->st_mtimespec.tv_sec,
-           buf->st_dev & 0x7ffffff);
-#else
-  eos_info("path=%s inode=%lu size=%lu mtime=%lu.%lu", mNsPath.c_str(), mFileId,
-           (unsigned long) buf->st_size, buf->st_mtim.tv_sec, buf->st_dev & 0x7ffffff);
-#endif
-  return rc;
-}
-
-//------------------------------------------------------------------------------
-// Implementation dependant commands
-//------------------------------------------------------------------------------
-int
-XrdFstOfsFile::fctl(const int cmd, int alen, const char* args,
-                    const XrdSecEntity* client)
-{
-  eos_debug("cmd=%i, args=%s", cmd, args);
-
-  if (cmd == SFS_FCTL_SPEC1) {
-    if (strncmp(args, "delete", alen) == 0) {
-      eos_warning("Setting deletion flag for file %s", mFstPath.c_str());
-      // This indicates to delete the file during the close operation
-      viaDelete = true;
-      return SFS_OK;
-    } else if (strncmp(args, "nochecksum", alen) == 0) {
-      int retc = SFS_OK;
-      eos_warning("Setting nochecksum flag for file %s", mFstPath.c_str());
-      mCheckSum.reset(nullptr);
-
-      // Propagate command to all the replicas/stripes
-      if (layOut) {
-        retc = layOut->Fctl(std::string(args), client);
-      }
-
-      return retc;
-    }
-  }
-
-  error.setErrInfo(ENOTSUP, "fctl command not supported");
-  return SFS_ERROR;
-}
-
-//------------------------------------------------------------------------------
-// Filter out particular tags from the opaque information
-//------------------------------------------------------------------------------
-void
-XrdFstOfsFile::FilterTagsInPlace(std::string& opaque,
-                                 const std::set<std::string> tags)
-{
-  bool found = false;
-  std::ostringstream oss;
-  std::list<std::string> tokens = eos::common::StringTokenizer::split
-                                  <std::list<std::string>>(opaque, '&');
-
-  for (const auto& token : tokens) {
-    found = false;
-
-    for (const auto& tag : tags) {
-      if (token.find(tag) == 0) {
-        found = true;
-        break;
-      }
-    }
-
-    if (!found && !token.empty()) {
-      oss << token << "&";
-    }
-  }
-
-  opaque = oss.str();
-
-  if (!opaque.empty()) {
-    opaque.pop_back();
-  }
-}
-
-//------------------------------------------------------------------------------
-// Return current mtime while open
-//------------------------------------------------------------------------------
-time_t
-XrdFstOfsFile::GetMtime()
-{
-  if (!isRW) {
-    // this is to report the MGM mtime to http get requests
-    if (mForcedMtime != 1) {
-      return mForcedMtime;
-    }
-  }
-
-  if (fMd) {
-    return fMd->mProtoFmd.mtime();
-  } else {
-    return 0;
-  }
+  return XrdOfsFile::close();
 }
 
 //------------------------------------------------------------------------------
 // Return FMD checksum
 //------------------------------------------------------------------------------
 std::string
-XrdFstOfsFile::GetFmdChecksum()
+XrdFstOfsFile::GetFmdChecksum() const
 {
-  return fMd->mProtoFmd.checksum();
+  if (mFmd) {
+    return mFmd->mProtoFmd.checksum();
+  } else {
+    return std::string();
+  }
 }
 
 //------------------------------------------------------------------------------
-// Check if layout encoding indicates a RAIN layout
+// Verify if a TPC key is still valid
 //------------------------------------------------------------------------------
 bool
-XrdFstOfsFile::IsRainLayout(unsigned long long lid)
+XrdFstOfsFile::TpcValid() const
 {
-  using eos::common::LayoutId;
-  unsigned long ltype = LayoutId::GetLayoutType(lid);
+  XrdSysMutexHelper scope_lock(gOFS.TpcMapMutex);
 
-  if ((ltype == LayoutId::kArchive) ||
-      (ltype == LayoutId::kRaidDP) ||
-      (ltype == LayoutId::kRaid6)) {
+  if (mTpcKey.length() &&  gOFS.TpcMap[mIsTpcDst].count(mTpcKey)) {
     return true;
-  } else {
-    return false;
   }
+
+  return false;
 }
 
 //------------------------------------------------------------------------------
@@ -2893,7 +2287,7 @@ XrdFstOfsFile::ProcessCapOpaque(bool& is_repair_read,
                      mNsPath.c_str());
   }
 
-  SetLogId(logId, vid, tIdent.c_str());
+  SetLogId(logId, vid, mTident.c_str());
   return SFS_OK;
 }
 
@@ -3037,7 +2431,7 @@ XrdFstOfsFile::ProcessTpcOpaque(std::string& opaque, const XrdSecEntity* client)
     gOFS.TpcMap[mIsTpcDst][tpc_key].lfn = tpc_lfn;
     // Set tpc key expiration time to 1 minute
     gOFS.TpcMap[mIsTpcDst][tpc_key].expires = time(NULL) + 60;
-    mTpcKey = tpc_key.c_str();
+    mTpcKey = tpc_key;
 
     if (mTpcFlag == kTpcDstSetup) {
       if (!tpc_lfn.length()) {
@@ -3154,7 +2548,7 @@ XrdFstOfsFile::ProcessTpcOpaque(std::string& opaque, const XrdSecEntity* client)
     gOFS.TpcMap[mIsTpcDst][tpc_key].expires = (now - 10);
     // Store the provided origin to compare with our local connection
     // gOFS.TpcMap[mIsTpcDst][tpc_key].org = tpc_org;
-    mTpcKey = tpc_key.c_str();
+    mTpcKey = tpc_key;
     // Save open opaque env
     mOpenOpaque.reset(new XrdOucEnv(opaque.c_str()));
 
@@ -3209,6 +2603,602 @@ XrdFstOfsFile::ProcessTpcOpaque(std::string& opaque, const XrdSecEntity* client)
   }
 
   return SFS_OK;
+}
+
+//------------------------------------------------------------------------------
+// Account for total read time
+//------------------------------------------------------------------------------
+void
+XrdFstOfsFile::AddReadTime()
+{
+  unsigned long mus = (lrTime.tv_sec - cTime.tv_sec) * 1000000 +
+                      (lrTime.tv_usec - cTime.tv_usec);
+  rTime.tv_sec += (mus / 1000000);
+  rTime.tv_usec += (mus % 1000000);
+}
+
+//------------------------------------------------------------------------------
+// Account for total readv time
+//------------------------------------------------------------------------------
+void
+XrdFstOfsFile::AddReadVTime()
+{
+  unsigned long mus = (lrvTime.tv_sec - cTime.tv_sec) * 1000000 +
+                      (lrvTime.tv_usec - cTime.tv_usec);
+  rvTime.tv_sec += (mus / 1000000);
+  rvTime.tv_usec += (mus % 1000000);
+}
+
+//------------------------------------------------------------------------------
+// Account for total write time
+//------------------------------------------------------------------------------
+void
+XrdFstOfsFile::AddWriteTime()
+{
+  unsigned long mus = ((lwTime.tv_sec - cTime.tv_sec) * 1000000) +
+                      lwTime.tv_usec - cTime.tv_usec;
+  wTime.tv_sec += (mus / 1000000);
+  wTime.tv_usec += (mus % 1000000);
+}
+
+//------------------------------------------------------------------------------
+// Make report
+//------------------------------------------------------------------------------
+void
+XrdFstOfsFile::MakeReportEnv(XrdOucString& reportString)
+{
+  // compute avg, min, max, sigma for read and written bytes
+  unsigned long long rmin, rmax, rsum;
+  unsigned long long rvmin, rvmax, rvsum; // readv bytes
+  unsigned long long rsmin, rsmax, rssum; // read single bytes
+  unsigned long rcmin, rcmax, rcsum;      // readv count
+  unsigned long long wmin, wmax, wsum;
+  double rsigma, rvsigma, rssigma, rcsigma, wsigma;
+  {
+    XrdSysMutexHelper vecLock(vecMutex);
+    ComputeStatistics(rvec, rmin, rmax, rsum, rsigma);
+    ComputeStatistics(wvec, wmin, wmax, wsum, wsigma);
+    ComputeStatistics(monReadvBytes, rvmin, rvmax, rvsum, rvsigma);
+    ComputeStatistics(monReadSingleBytes, rsmin, rsmax, rssum, rssigma);
+    ComputeStatistics(monReadvCount, rcmin, rcmax, rcsum, rcsigma);
+    char report[16384];
+
+    if (rmin == 0xffffffff) {
+      rmin = 0;
+    }
+
+    if (wmin == 0xffffffff) {
+      wmin = 0;
+    }
+
+    snprintf(report, sizeof(report) - 1,
+             "log=%s&path=%s&fstpath=%s&ruid=%u&rgid=%u&td=%s&"
+             "host=%s&lid=%lu&fid=%llu&fsid=%lu&"
+             "ots=%lu&otms=%lu&"
+             "cts=%lu&ctms=%lu&"
+             "nrc=%lu&nwc=%lu&"
+             "rb=%llu&rb_min=%llu&rb_max=%llu&rb_sigma=%.02f&"
+             "rv_op=%llu&rvb_min=%llu&rvb_max=%llu&rvb_sum=%llu&rvb_sigma=%.02f&"
+             "rs_op=%llu&rsb_min=%llu&rsb_max=%llu&rsb_sum=%llu&rsb_sigma=%.02f&"
+             "rc_min=%lu&rc_max=%lu&rc_sum=%lu&rc_sigma=%.02f&"
+             "wb=%llu&wb_min=%llu&wb_max=%llu&wb_sigma=%.02f&"
+             "sfwdb=%llu&sbwdb=%llu&sxlfwdb=%llu&sxlbwdb=%llu&"
+             "nfwds=%lu&nbwds=%lu&nxlfwds=%lu&nxlbwds=%lu&"
+             "rt=%.02f&rvt=%.02f&wt=%.02f&osize=%llu&csize=%llu&%s"
+             , this->logId
+             , mCapOpaque->Get("mgm.path") ? mCapOpaque->Get("mgm.path") : mNsPath.c_str()
+             , mFstPath.c_str()
+             , this->vid.uid, this->vid.gid, mTident.c_str()
+             , gOFS.mHostName, mLid, mFileId, mFsId
+             , openTime.tv_sec, (unsigned long) openTime.tv_usec / 1000
+             , closeTime.tv_sec, (unsigned long) closeTime.tv_usec / 1000
+             , rCalls, wCalls
+             , rsum, rmin, rmax, rsigma
+             , (unsigned long long)monReadvBytes.size(), rvmin, rvmax, rvsum, rvsigma
+             , (unsigned long long)monReadSingleBytes.size(), rsmin, rsmax, rssum, rssigma
+             , rcmin, rcmax, rcsum, rcsigma
+             , wsum
+             , wmin
+             , wmax
+             , wsigma
+             , sFwdBytes
+             , sBwdBytes
+             , sXlFwdBytes
+             , sXlBwdBytes
+             , nFwdSeeks
+             , nBwdSeeks
+             , nXlFwdSeeks
+             , nXlBwdSeeks
+             , ((rTime.tv_sec * 1000.0) + (rTime.tv_usec / 1000.0))
+             , ((rvTime.tv_sec * 1000.0) + (rvTime.tv_usec / 1000.0))
+             , ((wTime.tv_sec * 1000.0) + (wTime.tv_usec / 1000.0))
+             , (unsigned long long) openSize
+             , (unsigned long long) closeSize
+             , eos::common::SecEntity::ToEnv(mSecString.c_str(),
+                 ((mTpcFlag == kTpcDstSetup) ||
+                  (mTpcFlag == kTpcSrcRead)) ? "tpc" : 0).c_str());
+    reportString = report;
+  }
+}
+
+//------------------------------------------------------------------------------
+// Drop all replicas from the MGM
+//------------------------------------------------------------------------------
+int
+XrdFstOfsFile::DropAllFromMgm(eos::common::FileId::fileid_t fileid,
+                              const std::string path, const std::string manager)
+{
+  // If we committed the replica and an error happened remote, we have
+  // to unlink it again
+  XrdOucString hexstring = "";
+  eos::common::FileId::Fid2Hex(fileid, hexstring);
+  XrdOucErrInfo error;
+  XrdOucString capOpaqueString = "/?mgm.pcmd=drop";
+  XrdOucString OpaqueString = "";
+  OpaqueString += "&mgm.fid=";
+  OpaqueString += hexstring;
+  OpaqueString += "&mgm.fsid=anyway";
+  OpaqueString += "&mgm.dropall=1";
+  XrdOucEnv Opaque(OpaqueString.c_str());
+  capOpaqueString += OpaqueString;
+  // Delete the replica in the MGM
+  int rcode = gOFS.CallManager(&error, path.c_str(), manager.c_str(),
+                               capOpaqueString);
+
+  if (rcode && (error.getErrInfo() != EIDRM)) {
+    eos_warning("(unpersist): unable to drop file id %s fsid %u at manager %s",
+                hexstring.c_str(), fileid, manager.c_str());
+  }
+
+  eos_info("info=\"removing on manager\" manager=%s fid=%llu fsid= drop-allrc=%d",
+           manager.c_str(), (unsigned long long) fileid, rcode);
+  return rcode;
+}
+
+//------------------------------------------------------------------------------
+// Check if file has been modified while in use
+//------------------------------------------------------------------------------
+int
+XrdFstOfsFile::ModifiedWhileInUse()
+{
+  int rc = 0;
+  bool fileExists = true;
+  struct stat statinfo;
+
+  if (mLayout) {
+    if ((mLayout->Stat(&statinfo))) {
+      fileExists = false;
+    }
+  } else {
+    if ((XrdOfsOss->Stat(mFstPath.c_str(), &statinfo))) {
+      fileExists = false;
+    }
+  }
+
+  // Check if the file could have been changed in the meanwhile ...
+  if (fileExists && isReplication && (!isRW)) {
+    if (gOFS.openedForWriting.isOpen(mFsId, mFileId)) {
+      eos_err("file is now open for writing - discarding replication "
+              "[wopen=%d]", gOFS.openedForWriting.getUseCount(mFsId, mFileId));
+      gOFS.Emsg("closeofs", error, EIO,
+                "guarantee correctness - "
+                "file has been opened for writing during replication",
+                mNsPath.c_str());
+      rc = SFS_ERROR;
+    }
+
+    if ((statinfo.st_mtime != updateStat.st_mtime)) {
+      eos_err("file has been modified during replication");
+      rc = SFS_ERROR;
+      gOFS.Emsg("closeofs", error, EIO, "guarantee correctness -"
+                "file has been modified during replication", mNsPath.c_str());
+    }
+  }
+
+  return rc;
+}
+
+//------------------------------------------------------------------------------
+// Layout read callback
+//------------------------------------------------------------------------------
+int
+XrdFstOfsFile::LayoutReadCB(eos::fst::CheckSum::ReadCallBack::callback_data_t*
+                            cbd)
+{
+  return ((Layout*) cbd->caller)->Read(cbd->offset, cbd->buffer, cbd->size);
+}
+
+//------------------------------------------------------------------------------
+// File read callback
+//------------------------------------------------------------------------------
+int
+XrdFstOfsFile::FileIoReadCB(eos::fst::CheckSum::ReadCallBack::callback_data_t*
+                            cbd)
+{
+  return ((FileIo*) cbd->caller)->fileRead(cbd->offset, cbd->buffer, cbd->size);
+}
+
+//------------------------------------------------------------------------------
+// Verify checksum method
+//------------------------------------------------------------------------------
+bool
+XrdFstOfsFile::VerifyChecksum()
+{
+  bool checksumerror = false;
+  int checksumlen = 0;
+
+  // Deal with checksums
+  if (mCheckSum) {
+    mCheckSum->Finalize();
+
+    if (mCheckSum->NeedsRecalculation()) {
+      if ((!isRW) && ((sFwdBytes + sBwdBytes)
+                      || (mCheckSum->GetMaxOffset() != openSize))) {
+        // We don't rescan files if they are read non-sequential or only
+        // partially
+        eos_debug("info=\"skipping checksum (re-scan) for non-sequential "
+                  "reading ...\"");
+        mCheckSum.reset(nullptr);
+        return false;
+      }
+    } else {
+      eos_debug("isrw=%d max-offset=%lld opensize=%lld", isRW,
+                mCheckSum->GetMaxOffset(), openSize);
+
+      if (((!isRW) && ((mCheckSum->GetMaxOffset() != openSize) ||
+                       (!mCheckSum->GetMaxOffset())))) {
+        eos_debug("info=\"skipping checksum (re-scan) for access without any IO or "
+                  "partial sequential read IO from the beginning...\"");
+        mCheckSum.reset(nullptr);
+        return false;
+      }
+
+      if ((isRW) && mCheckSum->GetMaxOffset() &&
+          (mCheckSum->GetMaxOffset() < openSize)) {
+        // If there was a write which was not extending the file the checksum
+        // is dirty!
+        mCheckSum->SetDirty();
+      }
+    }
+
+    // If checksum is not completely computed
+    if (mCheckSum->NeedsRecalculation()) {
+      unsigned long long scansize = 0;
+      float scantime = 0; // is ms
+
+      if (!XrdOfsFile::fctl(SFS_FCTL_GETFD, 0, error)) {
+        // Rescan the file
+        eos::fst::CheckSum::ReadCallBack::callback_data_t cbd;
+        cbd.caller = (void*) mLayout.get();
+        eos::fst::CheckSum::ReadCallBack cb(LayoutReadCB, cbd);
+
+        if (mCheckSum->ScanFile(cb, scansize, scantime)) {
+          XrdOucString sizestring;
+          eos_info("info=\"rescanned checksum\" size=%s time=%.02f ms rate=%.02f MB/s %s",
+                   eos::common::StringConversion::GetReadableSizeString(sizestring,
+                       scansize, "B"),
+                   scantime,
+                   1.0 * scansize / 1000 / (scantime ? scantime : 99999999999999LL),
+                   mCheckSum->GetHexChecksum());
+        } else {
+          eos_err("Rescanning of checksum failed");
+          mCheckSum.reset(nullptr);
+          return false;
+        }
+      } else {
+        eos_err("Couldn't get file descriptor");
+        mCheckSum.reset(nullptr);
+        return false;
+      }
+    } else {
+      // This was prefect streaming I/O
+      if ((!isRW) && (mCheckSum->GetMaxOffset() != openSize)) {
+        eos_info("info=\"skipping checksum (re-scan) since file was not read "
+                 "completely %llu %llu...\"", mCheckSum->GetMaxOffset(), openSize);
+        mCheckSum.reset(nullptr);
+        return false;
+      }
+    }
+
+    if (isRW) {
+      eos_info("(write) checksum type: %s checksum hex: %s requested-checksum hex: %s",
+               mCheckSum->GetName(), mCheckSum->GetHexChecksum(),
+               mOpenOpaque->Get("mgm.checksum") ? mOpenOpaque->Get("mgm.checksum") : "-none-");
+
+      // Check if the check sum for the file was given at upload time
+      if (mOpenOpaque->Get("mgm.checksum")) {
+        XrdOucString opaqueChecksum = mOpenOpaque->Get("mgm.checksum");
+        XrdOucString hexChecksum = mCheckSum->GetHexChecksum();
+
+        if ((opaqueChecksum != "disable") && (opaqueChecksum != hexChecksum)) {
+          eos_err("requested checksum %s does not match checksum %s of uploaded"
+                  " file", opaqueChecksum.c_str(), hexChecksum.c_str());
+          mCheckSum.reset(nullptr);
+          return true;
+        }
+      }
+
+      mCheckSum->GetBinChecksum(checksumlen);
+      // Copy checksum into meta data
+      mFmd->mProtoFmd.set_checksum(mCheckSum->GetHexChecksum());
+
+      if (mHasWrite) {
+        // If we have no write, we don't set this attributes (xrd3cp!)
+        // set the eos checksum extended attributes
+        std::unique_ptr<eos::fst::FileIo> io(eos::fst::FileIoPlugin::GetIoObject(
+                                               mFstPath.c_str(), this));
+
+        if (((eos::common::LayoutId::GetLayoutType(mLid) ==
+              eos::common::LayoutId::kPlain) ||
+             (eos::common::LayoutId::GetLayoutType(mLid) ==
+              eos::common::LayoutId::kReplica))) {
+          // Don't put file checksum tags for complex layouts like raid6,readdp, archive
+          if (io->attrSet(std::string("user.eos.checksumtype"),
+                          std::string(mCheckSum->GetName()))) {
+            eos_err("unable to set extended attribute <eos.checksumtype> errno=%d", errno);
+          }
+
+          if (io->attrSet("user.eos.checksum", mCheckSum->GetBinChecksum(checksumlen),
+                          checksumlen)) {
+            eos_err("unable to set extended attribute <eos.checksum> errno=%d", errno);
+          }
+        }
+
+        // Reset any tagged error
+        if (io->attrSet("user.eos.filecxerror", "0")) {
+          eos_err("unable to set extended attribute <eos.filecxerror> errno=%d", errno);
+        }
+
+        if (io->attrSet("user.eos.blockcxerror", "0")) {
+          eos_err("unable to set extended attribute <eos.blockcxerror> errno=%d", errno);
+        }
+      }
+    } else {
+      // This is a read with checksum check, compare with fMD
+      bool isopenforwrite = gOFS.openedForWriting.isOpen(mFsId, mFileId);
+
+      if (isopenforwrite) {
+        eos_info("(read)  disabling checksum check: file is currently written");
+        return false;
+      }
+
+      eos_info("(read)  checksum type: %s checksum hex: %s fmd-checksum: %s",
+               mCheckSum->GetName(),
+               mCheckSum->GetHexChecksum(),
+               mFmd->mProtoFmd.checksum().c_str());
+      std::string calculatedchecksum = mCheckSum->GetHexChecksum();
+
+      // We might fetch an unitialized value, so that is not to be considered
+      // a checksum error yet.
+      if (mFmd->mProtoFmd.checksum() != "none") {
+        if (calculatedchecksum != mFmd->mProtoFmd.checksum().c_str()) {
+          checksumerror = true;
+        }
+      }
+    }
+  }
+
+  return checksumerror;
+}
+
+//----------------------------------------------------------------------------
+// Static method used to start an asynchronous thread which is doing the TPC
+// transfer
+//----------------------------------------------------------------------------
+void*
+XrdFstOfsFile::StartDoTpcTransfer(void* arg)
+{
+  return reinterpret_cast<XrdFstOfsFile*>(arg)->DoTpcTransfer();
+}
+
+//------------------------------------------------------------------------------
+// Run method for the thread doing the TPC transfer
+//------------------------------------------------------------------------------
+void*
+XrdFstOfsFile::DoTpcTransfer()
+{
+  eos_info("msg=\"tpc now running - 1st sync\"");
+  std::string src_url = "";
+  std::string src_cgi = "";
+
+  // The sync initiates the third party copy
+  if (!TpcValid()) {
+    eos_err("msg=\"tpc session invalidated during sync\"");
+    XrdSysMutexHelper scope_lock(mTpcJobMutex);
+    mTpcState = kTpcDone;
+    mTpcRetc = ECONNABORTED;
+    mTpcInfo.Reply(SFS_ERROR, ECONNABORTED, "sync TPC session closed by "
+                   "disconnect");
+    return 0;
+  }
+
+  {
+    XrdSysMutexHelper tpcLock(gOFS.TpcMapMutex);
+    // Construct the source URL
+    src_url = "root://";
+    src_url += gOFS.TpcMap[mIsTpcDst][mTpcKey].src;
+    src_url += "/";
+    src_url += gOFS.TpcMap[mIsTpcDst][mTpcKey].lfn;
+    src_url += "?fst.readahead=true";
+    src_cgi = "tpc.key=";
+    src_cgi += mTpcKey;
+    src_cgi += "&tpc.org=";
+    src_cgi += gOFS.TpcMap[mIsTpcDst][mTpcKey].org;
+  }
+
+  XrdIo tpcIO(src_url);
+  tpcIO.SetLogId(logId);
+  eos_info("sync-url=%s sync-cgi=%s", src_url.c_str(), src_cgi.c_str());
+
+  if (tpcIO.fileOpen(0, 0, src_cgi)) {
+    eos_err("msg=\"TPC open failed for url=%s cgi=%s\"", src_url.c_str(),
+            src_cgi.c_str());
+    XrdSysMutexHelper scope_lock(mTpcJobMutex);
+    mTpcState = kTpcDone;
+    mTpcRetc = EFAULT;
+    mTpcInfo.Reply(SFS_ERROR, EFAULT,
+                   SSTR("sync - TPC open failed for src_url=" << src_url).c_str());
+    return 0;
+  }
+
+  if (!TpcValid()) {
+    tpcIO.fileClose();
+    eos_err("msg=\"tpc session invalidated during sync\"");
+    XrdSysMutexHelper scope_lock(mTpcJobMutex);
+    mTpcState = kTpcDone;
+    mTpcRetc = ECONNABORTED;
+    mTpcInfo.Reply(SFS_ERROR, ECONNABORTED,
+                   SSTR("sync - TPC session closed by disconnect src_url="
+                        << src_url).c_str());
+    return 0;
+  }
+
+  int64_t rbytes = 0;
+  int64_t wbytes = 0;
+  off_t offset = 0;
+  constexpr uint64_t eight_gb = 8 * (2 ^ 30);
+  std::unique_ptr< std::vector<char> > buffer(
+    new std::vector<char>(tpcIO.GetBlockSize()));
+  eos_info("msg=\"tpc pull\" ");
+
+  do {
+    // Read the remote file in chunks and check after each chunk if the TPC
+    // has been aborted already
+    // @note this way of reading asynchronously in the buffer without waiting
+    // for the async requests works properly only if readahead is enabled.
+    // Otherwise, one must call fileWaitAsyncIO().
+    rbytes = tpcIO.fileReadAsync(offset, &((*buffer)[0]),
+                                 tpcIO.GetBlockSize(), true, 30);
+    eos_debug("msg=\"tpc read\" rbytes=%lli request=%llu",
+              rbytes, tpcIO.GetBlockSize());
+
+    if (rbytes == -1) {
+      (void) tpcIO.fileClose();
+      eos_err("msg=\"tpc transfer terminated - remote read failed\"");
+      XrdSysMutexHelper scope_lock(mTpcJobMutex);
+      mTpcState = kTpcDone;
+      mTpcRetc = EIO;
+      mTpcInfo.Reply(SFS_ERROR, EIO,
+                     SSTR("sync - TPC remote read failed src_url="
+                          << src_url).c_str());
+      return 0;
+    }
+
+    if (rbytes > 0) {
+      // Write the buffer out through the local object
+      wbytes = write(offset, &((*buffer)[0]), rbytes);
+      eos_debug("msg=\"tpc write\" wbytes=%llu", wbytes);
+
+      if (offset / eight_gb != (offset + rbytes) /  eight_gb) {
+        eos_info("msg=\"tcp write\" offset=%llu", offset);
+      }
+
+      if (rbytes != wbytes) {
+        (void) tpcIO.fileClose();
+        eos_err("msg=\"tpc transfer terminated - local write failed\"");
+        XrdSysMutexHelper scope_lock(mTpcJobMutex);
+        mTpcState = kTpcDone;
+        mTpcRetc = EIO;
+        mTpcInfo.Reply(SFS_ERROR, EIO, "sync - TPC local write failed");
+        return 0;
+      }
+
+      offset += rbytes;
+    }
+
+    // Check validity of the TPC key
+    if (!TpcValid()) {
+      (void) tpcIO.fileClose();
+      eos_err("msg=\"tpc transfer invalidated during sync\"");
+      XrdSysMutexHelper scope_lock(mTpcJobMutex);
+      mTpcState = kTpcDone;
+      mTpcRetc = ECONNABORTED;
+      mTpcInfo.Reply(SFS_ERROR, ECONNABORTED, "sync - TPC session closed "
+                     "by diconnect");
+      return 0;
+    }
+  } while (rbytes > 0);
+
+  // Close the remote file
+  eos_info("msg=\"done tpc transfer, close remote file\" src_url=%s",
+           src_url.c_str());
+  XrdCl::XRootDStatus st = tpcIO.fileClose();
+  XrdSysMutexHelper scope_lock(mTpcJobMutex);
+  mTpcState = kTpcDone;
+  mTpcInfo.Reply(SFS_OK, 0, "");
+  return 0;
+}
+
+//------------------------------------------------------------------------------
+// Filter out particular tags from the opaque information
+//------------------------------------------------------------------------------
+void
+XrdFstOfsFile::FilterTagsInPlace(std::string& opaque,
+                                 const std::set<std::string> tags)
+{
+  bool found = false;
+  std::ostringstream oss;
+  std::list<std::string> tokens = eos::common::StringTokenizer::split
+                                  <std::list<std::string>>(opaque, '&');
+
+  for (const auto& token : tokens) {
+    found = false;
+
+    for (const auto& tag : tags) {
+      if (token.find(tag) == 0) {
+        found = true;
+        break;
+      }
+    }
+
+    if (!found && !token.empty()) {
+      oss << token << "&";
+    }
+  }
+
+  opaque = oss.str();
+
+  if (!opaque.empty()) {
+    opaque.pop_back();
+  }
+}
+
+//------------------------------------------------------------------------------
+// Return current mtime while open
+//------------------------------------------------------------------------------
+time_t
+XrdFstOfsFile::GetMtime() const
+{
+  if (!isRW) {
+    // this is to report the MGM mtime to http get requests
+    if (mForcedMtime != 1) {
+      return mForcedMtime;
+    }
+  }
+
+  if (mFmd) {
+    return mFmd->mProtoFmd.mtime();
+  } else {
+    return 0;
+  }
+}
+
+//------------------------------------------------------------------------------
+// Check if layout encoding indicates a RAIN layout
+//------------------------------------------------------------------------------
+bool
+XrdFstOfsFile::IsRainLayout(unsigned long long lid)
+{
+  using eos::common::LayoutId;
+  unsigned long ltype = LayoutId::GetLayoutType(lid);
+
+  if ((ltype == LayoutId::kArchive) ||
+      (ltype == LayoutId::kRaidDP) ||
+      (ltype == LayoutId::kRaid6)) {
+    return true;
+  } else {
+    return false;
+  }
 }
 
 //------------------------------------------------------------------------------
@@ -3404,7 +3394,8 @@ int XrdFstOfsFile::SendArchiveFailedToManager(const uint64_t fid,
 
   if (!common::SymKey::Base64Encode(errMsg.c_str(), errMsg.length(),
                                     encodedErrMsg)) {
-    // "Failed to encode message using base64" in base64 is RmFpbGVkIHRvIGVuY29kZSBtZXNzYWdlIHVzaW5nIGJhc2U2NA==
+    // "Failed to encode message using base64" in base64 is
+    // RmFpbGVkIHRvIGVuY29kZSBtZXNzYWdlIHVzaW5nIGJhc2U2NA==
     encodedErrMsg = "RmFpbGVkIHRvIGVuY29kZSBtZXNzYWdlIHVzaW5nIGJhc2U2NA==";
   }
 
@@ -3422,9 +3413,9 @@ int XrdFstOfsFile::SendArchiveFailedToManager(const uint64_t fid,
   errorReportOpaque += "&mgm.rgid=0";
   errorReportOpaque += "&mgm.errmsg=";
   errorReportOpaque += encodedErrMsg.c_str();
-  eos_info("msg=\"sending error message to manager\" path=\"%s\" manager=\"%s\" errorReportOpaque=\"%s\"",
-           mCapOpaque->Get("mgm.path"), mCapOpaque->Get("mgm.manager"),
-           errorReportOpaque.c_str());
+  eos_info("msg=\"sending error message to manager\" path=\"%s\" manager=\"%s\" "
+           "errorReportOpaque=\"%s\"", mCapOpaque->Get("mgm.path"),
+           mCapOpaque->Get("mgm.manager"), errorReportOpaque.c_str());
   return gOFS.CallManager(&error, mCapOpaque->Get("mgm.path"),
                           mCapOpaque->Get("mgm.manager"),
                           errorReportOpaque, nullptr, 30, mSyncEventOnClose, false);
