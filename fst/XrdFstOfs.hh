@@ -30,6 +30,7 @@
 #include "fst/utils/OpenFileTracker.hh"
 #include "common/Logging.hh"
 #include "common/XrdConnPool.hh"
+#include "common/ThreadPool.hh"
 #include "mq/XrdMqMessaging.hh"
 #include "mq/XrdMqSharedObject.hh"
 #include "XrdOfs/XrdOfs.hh"
@@ -41,7 +42,6 @@
 #include <queue>
 #include <memory>
 #include <chrono>
-
 
 //------------------------------------------------------------------------------
 //! Apple does not know these errnos
@@ -114,7 +114,7 @@ public:
   //----------------------------------------------------------------------------
   //! Destructor
   //----------------------------------------------------------------------------
-  virtual ~XrdFstOfs();
+  virtual ~XrdFstOfs() = default;
 
   //----------------------------------------------------------------------------
   //! Get new OFS directory object
@@ -380,10 +380,13 @@ public:
   QdbContactDetails mQdbContactDetails; ///< QDB contact details
   bool mMqOnQdb; ///< Are we using QDB as an MQ?
   int mHttpdPort; ///< listening port of the http server
+
 private:
+  //! Thread pool for async file close operations
+  eos::common::ThreadPool mCloseThreadPool;
   //! Xrd connection pool for interaction with the MGM, used from CallManager
   std::unique_ptr<eos::common::XrdConnPool> mMgmXrdPool;
-  HttpServer* mHttpd; ///< Embedded http server
+  std::unique_ptr<HttpServer> mHttpd; ///< Embedded http server
   bool Simulate_IO_read_error; ///< simulate an IO error on read
   bool Simulate_IO_write_error; ///< simulate an IO error on write
   bool Simulate_XS_read_error; ///< simulate a checksum error on read

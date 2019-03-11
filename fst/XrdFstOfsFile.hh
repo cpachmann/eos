@@ -69,7 +69,9 @@ class XrdFstOfsFile : public XrdOfsFile, public eos::common::LogId
 
 public:
 
-  static const uint16_t msDefaultTimeout; ///< Default timeout value in ms
+  //! Minimum file size for which async close is trig
+  static constexpr uint64_t msMinSizeAsyncClose {2 * (2 ^ 30)}; // 2GB
+  static constexpr uint16_t msDefaultTimeout {300};
   static int LayoutReadCB(eos::fst::CheckSum::ReadCallBack::callback_data_t* cbd);
   static int FileIoReadCB(eos::fst::CheckSum::ReadCallBack::callback_data_t* cbd);
 
@@ -214,7 +216,7 @@ public:
   off_t mMinSize;
   off_t mMaxSize;
   bool viaDelete;
-  bool writeDelete;
+  bool mWrDelete; ///< Flag file to be deleted due to write errors
   uint64_t mRainSize; ///< Rain file size used during reconstruction
   XrdOucString mNsPath; /// Logical file path (from the namespace)
   XrdOucString mLocalPrefix; ///< Prefix on the local storage
@@ -234,7 +236,7 @@ public:
   bool mHasWrite; //! indicator that file was written/modified
   bool hasWriteError;// indicator for write errros to avoid message flooding
   bool hasReadError; //! indicator if a RAIN file could be reconstructed or not
-  bool isRW; //! indicator that file is opened for rw
+  bool mIsRW; //! indicator that file is opened for rw
   bool mIsDevNull; ///< If true file act as a sink i.e. /dev/null
   bool isCreation; //! indicator that a new file is created
   bool isReplication; //! indicator that the opened file is a replica transfer
@@ -282,7 +284,7 @@ public:
   std::string mTident; ///< Client identity using the file object
   // File statistics for monitoring purposes
   //! Largest byte position written of a newly created file
-  unsigned long long maxOffsetWritten;
+  unsigned long long mMaxOffsetWritten;
   off_t openSize; //! file size when the file was opened
   off_t closeSize; //! file size when the file was closed
   struct timeval openTime; //! time when a file was opened
@@ -375,6 +377,14 @@ public:
   //----------------------------------------------------------------------------
   static void FilterTagsInPlace(std::string& opaque,
                                 const std::set<std::string> tags);
+
+  //----------------------------------------------------------------------------
+  //! Close internal method that can be called synchronously (from XRootD) or
+  //! asynchronously from the thread pool for long running close operations.
+  //!
+  //! @return SFS_OK if close successful, otherwise SFS_ERROR
+  //----------------------------------------------------------------------------
+  int _close();
 
   //----------------------------------------------------------------------------
   //! Low-level open calling the default XrdOfs plugin and begin called from

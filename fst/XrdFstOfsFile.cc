@@ -40,7 +40,8 @@ extern XrdOssSys* XrdOfsOss;
 
 EOSFSTNAMESPACE_BEGIN
 
-const uint16_t XrdFstOfsFile::msDefaultTimeout = 300; // default timeout value
+constexpr uint64_t XrdFstOfsFile::msMinSizeAsyncClose;
+constexpr uint16_t XrdFstOfsFile::msDefaultTimeout;
 
 //------------------------------------------------------------------------------
 // Constructor
@@ -49,17 +50,17 @@ XrdFstOfsFile::XrdFstOfsFile(const char* user, int MonID) :
   XrdOfsFile(user, MonID), eos::common::LogId(),
   mOpenOpaque(nullptr), mCapOpaque(nullptr), mFstPath(""), mBookingSize(0),
   mTargetSize(0), mMinSize(0), mMaxSize(0), viaDelete(false),
-  writeDelete(false), mRainSize(0), mNsPath(""), mLocalPrefix(""),
+  mWrDelete(false), mRainSize(0), mNsPath(""), mLocalPrefix(""),
   mRedirectManager(""), mSecString(""), mEtag(""), mFileId(0),
   mFsId(0), mLid(0), mCid(0), mForcedMtime(1), mForcedMtime_ms(0),
   mFusex(false), mFusexIsUnlinked(false), closed(false), opened(false),
-  mHasWrite(false), hasWriteError(false), hasReadError(false), isRW(false),
+  mHasWrite(false), hasWriteError(false), hasReadError(false), mIsRW(false),
   mIsDevNull(false), isCreation(false), isReplication(false),
   mIsInjection(false), mRainReconstruct(false), deleteOnClose(false),
   repairOnClose(false), mIsOCchunk(false), writeErrorFlag(false),
   commitReconstruction(false), mEventOnClose(false), mEventWorkflow(""),
   mSyncEventOnClose(false), mFmd(nullptr), mCheckSum(nullptr),
-  mLayout(nullptr), mCloseCb(nullptr), maxOffsetWritten(0ull), openSize(0),
+  mLayout(nullptr), mCloseCb(nullptr), mMaxOffsetWritten(0ull), openSize(0),
   closeSize(0), mTpcThreadStatus(EINVAL), mTpcState(kTpcIdle),
   mTpcFlag(kTpcNone), mTpcKey(""), mIsTpcDst(false), mTpcRetc(0)
 {
@@ -100,7 +101,7 @@ XrdFstOfsFile::open(const char* path, XrdSfsFileOpenMode open_mode,
   SetLogId(ExtractLogId(opaque).c_str(), client, tident);
   mTident = error.getErrUser();
   char* val = 0;
-  isRW = false;
+  mIsRW = false;
   int retc = SFS_OK;
   int envlen = 0;
   mNsPath = path;
@@ -175,12 +176,12 @@ XrdFstOfsFile::open(const char* path, XrdSfsFileOpenMode open_mode,
   }
 
   if ((open_mode & (SFS_O_WRONLY | SFS_O_RDWR | SFS_O_CREAT | SFS_O_TRUNC))) {
-    isRW = true;
+    mIsRW = true;
   }
 
   // File is supposed to act as a sink, used for draining
   if (mNsPath == "/replicate:0") {
-    if (isRW) {
+    if (mIsRW) {
       eos_info("%s", "msg=\"file fid=0 acting as a sink i.e. /dev/null\"");
       mIsDevNull = true;
       return SFS_OK;
@@ -205,7 +206,7 @@ XrdFstOfsFile::open(const char* path, XrdSfsFileOpenMode open_mode,
   }
 
   // Check if this is an open for HTTP
-  if ((!isRW) && ((std::string(client->tident) == "http"))) {
+  if ((!mIsRW) && ((std::string(client->tident) == "http"))) {
     if (gOFS.openedForWriting.isOpen(mFsId, mFileId)) {
       eos_err("forbid to open replica for synchronization - file %s is opened "
               "in RW mode", mNsPath.c_str());
@@ -244,7 +245,7 @@ XrdFstOfsFile::open(const char* path, XrdSfsFileOpenMode open_mode,
                        " of file ", mCapOpaque->Env(envlen));
     }
 
-    if (isRW || (mCapOpaque->Get("mgm.zerosize"))) {
+    if (mIsRW || (mCapOpaque->Get("mgm.zerosize"))) {
       // File does not exist, keep the create flag for writers and readers with 0-size at MGM
       isCreation = true;
       openSize = 0;
@@ -270,7 +271,7 @@ XrdFstOfsFile::open(const char* path, XrdSfsFileOpenMode open_mode,
   }
 
   // Capability access distinction
-  if (isRW) {
+  if (mIsRW) {
     if (isCreation) {
       if (!mCapOpaque->Get("mgm.access")
           || ((strcmp(mCapOpaque->Get("mgm.access"), "create")) &&
@@ -300,7 +301,7 @@ XrdFstOfsFile::open(const char* path, XrdSfsFileOpenMode open_mode,
   }
 
   // Bookingsize is only needed for file creation
-  if (isRW && isCreation) {
+  if (mIsRW && isCreation) {
     const char* sbookingsize = 0;
     const char* stargetsize = 0;
 
@@ -347,7 +348,7 @@ XrdFstOfsFile::open(const char* path, XrdSfsFileOpenMode open_mode,
 
   eos_info("fstpath=%s", mFstPath.c_str());
   mFmd.reset(gFmdDbMapHandler.LocalGetFmd(mFileId, mFsId, vid.uid, vid.gid,
-                                          mLid, isRW, isRepairRead));
+                                          mLid, mIsRW, isRepairRead));
 
   if ((mFmd == nullptr) || gOFS.Simulate_FMD_open_error) {
     if (!gOFS.Simulate_FMD_open_error) {
@@ -355,7 +356,7 @@ XrdFstOfsFile::open(const char* path, XrdSfsFileOpenMode open_mode,
       if (gFmdDbMapHandler.ResyncMgm(mFsId, mFileId, mRedirectManager.c_str())) {
         eos_info("msg=\"resync ok\" fsid=%lu fid=%llx", (unsigned long) mFsId, mFileId);
         mFmd.reset(gFmdDbMapHandler.LocalGetFmd(mFileId, mFsId, vid.uid,
-                                                vid.gid, mLid, isRW));
+                                                vid.gid, mLid, mIsRW));
       } else {
         eos_err("msg=\"resync failed\" fsid=%lu fid=%llx", (unsigned long) mFsId,
                 mFileId);
@@ -363,7 +364,7 @@ XrdFstOfsFile::open(const char* path, XrdSfsFileOpenMode open_mode,
     }
 
     if ((mFmd == nullptr) || gOFS.Simulate_FMD_open_error) {
-      if ((!isRW) || (mLayout->IsEntryServer() && (!isReplication))) {
+      if ((!mIsRW) || (mLayout->IsEntryServer() && (!isReplication))) {
         eos_crit("no fmd for fileid %llu on filesystem %lu", mFileId, mFsId);
         eos_warning("failed to get FMD record return recoverable error ENOENT(kXR_NotFound)");
 
@@ -477,7 +478,7 @@ XrdFstOfsFile::open(const char* path, XrdSfsFileOpenMode open_mode,
     }
 
     // Preset with the last known checksum
-    if (mCheckSum && isRW && !IsChunkedUpload()) {
+    if (mCheckSum && mIsRW && !IsChunkedUpload()) {
       eos_info("msg=\"reset init\" file-xs=%s", mFmd->mProtoFmd.checksum().c_str());
       mCheckSum->ResetInit(0, openSize, mFmd->mProtoFmd.checksum().c_str());
     }
@@ -486,7 +487,7 @@ XrdFstOfsFile::open(const char* path, XrdSfsFileOpenMode open_mode,
   // If we are not the entry server for RAIN layouts we disable the checksum
   // object for write. If we read we don't check checksums at all since we
   // have block and parity checking.
-  if (IsRainLayout(mLid) && ((!isRW) || (!mLayout->IsEntryServer()))) {
+  if (IsRainLayout(mLid) && ((!mIsRW) || (!mLayout->IsEntryServer()))) {
     mCheckSum.reset(nullptr);
   }
 
@@ -497,7 +498,7 @@ XrdFstOfsFile::open(const char* path, XrdSfsFileOpenMode open_mode,
     std::unique_ptr<FileIo> io(FileIoPlugin::GetIoObject(
                                  mLayout->GetLocalReplicaPath(), this));
 
-    if (isRW) {
+    if (mIsRW) {
       if (mNsPath.beginswith("/replicate:") || mNsPath.beginswith("/fusex-open")) {
         if (mCapOpaque->Get("mgm.path")) {
           XrdOucString unsealedpath = mCapOpaque->Get("mgm.path");
@@ -520,7 +521,7 @@ XrdFstOfsFile::open(const char* path, XrdSfsFileOpenMode open_mode,
     // Try to get error if the file has a scan error
     io->attrGet("user.eos.filecxerror", filecxerror);
 
-    if ((!isRW) && (filecxerror == "1")) {
+    if ((!mIsRW) && (filecxerror == "1")) {
       if (eos::common::LayoutId::GetLayoutType(mLid) ==
           eos::common::LayoutId::kReplica) {
         eos_err("open of %s failed - replica has a checksum mismatch", mNsPath.c_str());
@@ -534,7 +535,7 @@ XrdFstOfsFile::open(const char* path, XrdSfsFileOpenMode open_mode,
     opened = true;
     XrdSysMutexHelper scop_lock(gOFS.OpenFidMutex);
 
-    if (isRW) {
+    if (mIsRW) {
       gOFS.openedForWriting.up(mFsId, mFileId);
     } else {
       gOFS.openedForReading.up(mFsId, mFileId);
@@ -555,7 +556,7 @@ XrdFstOfsFile::open(const char* path, XrdSfsFileOpenMode open_mode,
     return gOFS.Emsg(epname, error, EIO, "open - failed open");
   }
 
-  if (isRW) {
+  if (mIsRW) {
     if (!gOFS.Storage->OpenTransaction(mFsId, mFileId)) {
       eos_crit("cannot open transaction for fsid=%u fid=%llu", mFsId, mFileId);
     }
@@ -685,7 +686,7 @@ XrdFstOfsFile::write(XrdSfsFileOffset fileOffset, const char* buffer,
   if (mIsDevNull) {
     eos_debug("offset=%llu, length=%li discarded for sink file", fileOffset,
               buffer_size);
-    maxOffsetWritten = fileOffset + buffer_size;
+    mMaxOffsetWritten = fileOffset + buffer_size;
     return buffer_size;
   }
 
@@ -710,8 +711,8 @@ XrdFstOfsFile::write(XrdSfsFileOffset fileOffset, const char* buffer,
     }
 
     if (static_cast<unsigned long long>(fileOffset + buffer_size) >
-        static_cast<unsigned long long>(maxOffsetWritten)) {
-      maxOffsetWritten = (fileOffset + buffer_size);
+        static_cast<unsigned long long>(mMaxOffsetWritten)) {
+      mMaxOffsetWritten = (fileOffset + buffer_size);
     }
   }
 
@@ -736,7 +737,7 @@ XrdFstOfsFile::write(XrdSfsFileOffset fileOffset, const char* buffer,
   if (rc < 0) {
     int envlen = 0;
     // Indicate the deletion flag for write errors
-    writeDelete = true;
+    mWrDelete = true;
     XrdOucString errdetail;
 
     if (isCreation) {
@@ -809,7 +810,7 @@ XrdFstOfsFile::stat(struct stat* buf)
   int rc = SFS_OK;
 
   if (mIsDevNull) {
-    buf->st_size = maxOffsetWritten;
+    buf->st_size = mMaxOffsetWritten;
     return rc;
   }
 
@@ -961,7 +962,42 @@ XrdFstOfsFile::truncate(XrdSfsFileOffset fsize)
 int
 XrdFstOfsFile::close()
 {
-  EPNAME("close");
+  // Close happening the in the same XRootD thread
+  if (viaDelete || mWrDelete || (mIsRW == false) ||
+      (mIsRW && mMaxOffsetWritten <= msMinSizeAsyncClose)) {
+    return _close();
+  }
+
+  // Delegate close to a different thread while the client is waiting for the
+  // callback (SFS_STARTED). This only happens for written files with size
+  // bigger than msMinSizeAsyncClose (2GB).
+  eos_info("msg=\"close delegated to async thread \" fid=%llu ns_path=\"%s\" "
+           "fs_path=\"%s\"", mFsId, mNsPath.c_str(), mFstPath.c_str());
+  // Create a close callback and put the client in waiting mode
+  mCloseCb.reset(new XrdOucCallBack());
+  mCloseCb->Init(&error);
+  error.setErrInfo(1800, "delay client up to 30 minutes");
+  gOFS.mCloseThreadPool.PushTask<void>([&]() -> void {
+    eos_info("%s", "msg=\"doing close in the async thread\"");
+    int rc = _close();
+    int reply_rc = mCloseCb->Reply(rc, (rc ? error.getErrInfo() : 0),
+    (rc ? error.getErrText() : ""));
+
+    if (reply_rc == 0)
+    {
+      eos_err("msg=\"callback reply rc=%i\"", reply_rc);
+    }
+  });
+  return SFS_STARTED;
+}
+
+//------------------------------------------------------------------------------
+// Close file - internal method
+//------------------------------------------------------------------------------
+int
+XrdFstOfsFile::_close()
+{
+  EPNAME("_close");
   int rc = 0; // return code
   int brc = 0; // return code before 'close' has been called
   bool checksumerror = false;
@@ -970,6 +1006,7 @@ XrdFstOfsFile::close()
   bool minimumsizeerror = false;
   bool consistencyerror = false;
   bool atomicoverlap = false;
+  std::this_thread::sleep_for(std::chrono::seconds(100));
 
   // Any close on a file opened in TPC mode invalidates tpc keys
   if (mTpcKey.length()) {
@@ -1019,7 +1056,7 @@ XrdFstOfsFile::close()
     capOpaqueString += OpaqueString;
     eos_info("viaDelete=%d", viaDelete);
 
-    if ((viaDelete || writeDelete) &&
+    if ((viaDelete || mWrDelete) &&
         ((isCreation || IsChunkedUpload()) && (!mFusex))) {
       // It is closed by the destructor e.g. no proper close
       // or the specified checksum does not match the computed one
@@ -1029,7 +1066,7 @@ XrdFstOfsFile::close()
                  mFmd->mProtoFmd.fid());
       }
 
-      if (writeDelete) {
+      if (mWrDelete) {
         eos_info("msg=\"(unpersist): deleting file\" reason=\"write/policy error\""
                  " fsid=%u fxid=%08x on fsid=%u", mFmd->mProtoFmd.fsid(), mFmd->mProtoFmd.fid());
       }
@@ -1061,34 +1098,34 @@ XrdFstOfsFile::close()
           // the entry server has to truncate only if this is not a recovery action
           if (mLayout->IsEntryServer() && !mRainReconstruct) {
             eos_info("msg=\"truncate RAIN layout\" truncate-offset=%llu",
-                     maxOffsetWritten);
-            mLayout->Truncate(maxOffsetWritten);
+                     mMaxOffsetWritten);
+            mLayout->Truncate(mMaxOffsetWritten);
           }
         } else {
-          if ((long long) maxOffsetWritten > (long long) openSize) {
+          if ((long long) mMaxOffsetWritten > (long long) openSize) {
             // Check if we have to deallocate something for this file transaction
-            if ((mBookingSize) && (mBookingSize > (long long) maxOffsetWritten)) {
-              eos_info("deallocationg %llu bytes", mBookingSize - maxOffsetWritten);
-              mLayout->Truncate(maxOffsetWritten);
+            if ((mBookingSize) && (mBookingSize > (long long) mMaxOffsetWritten)) {
+              eos_info("deallocationg %llu bytes", mBookingSize - mMaxOffsetWritten);
+              mLayout->Truncate(mMaxOffsetWritten);
               // We have evt. to deallocate blocks which have not been written
-              mLayout->Fdeallocate(maxOffsetWritten, mBookingSize);
+              mLayout->Fdeallocate(mMaxOffsetWritten, mBookingSize);
             }
           }
         }
       }
 
       checksumerror = VerifyChecksum();
-      targetsizeerror = (mTargetSize) ? (mTargetSize != (off_t) maxOffsetWritten) :
+      targetsizeerror = (mTargetSize) ? (mTargetSize != (off_t) mMaxOffsetWritten) :
                         false;
 
       if (isCreation) {
         // Check that the minimum file size policy is met!
-        minimumsizeerror = (mMinSize) ? ((off_t) maxOffsetWritten < mMinSize) : false;
+        minimumsizeerror = (mMinSize) ? ((off_t) mMaxOffsetWritten < mMinSize) : false;
 
         if (minimumsizeerror) {
           eos_warning("written file %s is smaller than required minimum file "
                       "size=%llu written=%llu", mNsPath.c_str(), mMinSize,
-                      maxOffsetWritten);
+                      mMaxOffsetWritten);
         }
       }
 
@@ -1099,22 +1136,22 @@ XrdFstOfsFile::close()
       }
 
       eos_debug("checksumerror = %i, targetsizerror= %i,"
-                "maxOffsetWritten = %zu, targetsize = %lli",
-                checksumerror, targetsizeerror, maxOffsetWritten, mTargetSize);
+                "mMaxOffsetWritten = %zu, targetsize = %lli",
+                checksumerror, targetsizeerror, mMaxOffsetWritten, mTargetSize);
 
       // ---- add error simulation for checksum errors on read
-      if ((!isRW) && gOFS.Simulate_XS_read_error) {
+      if ((!mIsRW) && gOFS.Simulate_XS_read_error) {
         checksumerror = true;
         eos_warning("simlating checksum errors on read");
       }
 
       // ---- add error simulation for checksum errors on write
-      if (isRW && gOFS.Simulate_XS_write_error) {
+      if (mIsRW && gOFS.Simulate_XS_write_error) {
         checksumerror = true;
         eos_warning("simlating checksum errors on write");
       }
 
-      if (isRW && (checksumerror || targetsizeerror || minimumsizeerror)) {
+      if (mIsRW && (checksumerror || targetsizeerror || minimumsizeerror)) {
         // We have a checksum error if the checksum was preset and does not match!
         // We have a target size error, if the target size was preset and does not match!
         // Set the file to be deleted
@@ -1321,7 +1358,7 @@ XrdFstOfsFile::close()
                          " - closing transaction to keep the file save - rc = %d", error.getErrText(),
                          rc);
 
-                if (isRW) {
+                if (mIsRW) {
                   gOFS.Storage->CloseTransaction(mFsId, mFileId);
                 }
               }
@@ -1333,7 +1370,7 @@ XrdFstOfsFile::close()
       }
     }
 
-    if (isRW && (rc == SFS_OK)) {
+    if (mIsRW && (rc == SFS_OK)) {
       gOFS.Storage->CloseTransaction(mFsId, mFileId);
     }
 
@@ -1393,7 +1430,7 @@ XrdFstOfsFile::close()
     {
       XrdSysMutexHelper scope_lock(gOFS.OpenFidMutex);
 
-      if (isRW) {
+      if (mIsRW) {
         if ((mIsInjection || isCreation || IsChunkedUpload()) && (!rc) &&
             (gOFS.openedForWriting.getUseCount(mFmd->mProtoFmd.fsid(),
                                                mFmd->mProtoFmd.fid() > 1))) {
@@ -1429,7 +1466,7 @@ XrdFstOfsFile::close()
         gOFS.ReportQueueMutex.UnLock();
       }
 
-      if (isRW) {
+      if (mIsRW) {
         // Store in the WrittenFilesQueue
         gOFS.WrittenFilesQueueMutex.Lock();
         gOFS.WrittenFilesQueue.push(mFmd->mProtoFmd);
@@ -1650,7 +1687,7 @@ XrdFstOfsFile::close()
         mEventWorkflow = "default";
       }
 
-      if (isRW) {
+      if (mIsRW) {
         eventType = mSyncEventOnClose ? "sync::closew" : "closew";
       } else {
         eventType = "closer";
@@ -1722,22 +1759,7 @@ XrdFstOfsFile::close()
     }
   }
 
-  // Create a close callback and put the client in waiting mode
-  mCloseCb.reset(new XrdOucCallBack());
-  mCloseCb->Init(&error);
-  error.setErrCB(mCloseCb.get());
-  error.setErrInfo(120, "");
-  eos_info("%s", "msg=\"setting up the callback object\"");
-  std::thread t([&]() {
-    eos_info("%s", "msg=\"doing work in the async thread\"");
-    std::this_thread::sleep_for(std::chrono::seconds(80));
-    eos_info("%s", "msg=\"done work in the async thread\"");
-    int reply_rc = mCloseCb->Reply(SFS_OK, 100, "");
-    eos_info("msg=\"callback reply rc=%i\"", reply_rc);
-  });
-  t.detach();
-  rc = SFS_STARTED;
-  eos_info("Return code rc=%i errc=%d", rc, error.getErrInfo());
+  eos_info("msg=\"done close\" rc=%i errc=%d", rc, error.getErrInfo());
   return rc;
 }
 
@@ -1989,7 +2011,7 @@ XrdFstOfsFile::truncateofs(XrdSfsFileOffset fileOffset)
 {
   // Truncation moves the max offset written
   eos_debug("value=%llu", (unsigned long long) fileOffset);
-  maxOffsetWritten = fileOffset;
+  mMaxOffsetWritten = fileOffset;
   struct stat buf;
 
   // stat the current file size
@@ -2776,7 +2798,7 @@ XrdFstOfsFile::ModifiedWhileInUse()
   }
 
   // Check if the file could have been changed in the meanwhile ...
-  if (fileExists && isReplication && (!isRW)) {
+  if (fileExists && isReplication && (!mIsRW)) {
     if (gOFS.openedForWriting.isOpen(mFsId, mFileId)) {
       eos_err("file is now open for writing - discarding replication "
               "[wopen=%d]", gOFS.openedForWriting.getUseCount(mFsId, mFileId));
@@ -2832,8 +2854,8 @@ XrdFstOfsFile::VerifyChecksum()
     mCheckSum->Finalize();
 
     if (mCheckSum->NeedsRecalculation()) {
-      if ((!isRW) && ((sFwdBytes + sBwdBytes)
-                      || (mCheckSum->GetMaxOffset() != openSize))) {
+      if ((!mIsRW) && ((sFwdBytes + sBwdBytes)
+                       || (mCheckSum->GetMaxOffset() != openSize))) {
         // We don't rescan files if they are read non-sequential or only
         // partially
         eos_debug("info=\"skipping checksum (re-scan) for non-sequential "
@@ -2842,18 +2864,18 @@ XrdFstOfsFile::VerifyChecksum()
         return false;
       }
     } else {
-      eos_debug("isrw=%d max-offset=%lld opensize=%lld", isRW,
+      eos_debug("isrw=%d max-offset=%lld opensize=%lld", mIsRW,
                 mCheckSum->GetMaxOffset(), openSize);
 
-      if (((!isRW) && ((mCheckSum->GetMaxOffset() != openSize) ||
-                       (!mCheckSum->GetMaxOffset())))) {
+      if (((!mIsRW) && ((mCheckSum->GetMaxOffset() != openSize) ||
+                        (!mCheckSum->GetMaxOffset())))) {
         eos_debug("info=\"skipping checksum (re-scan) for access without any IO or "
                   "partial sequential read IO from the beginning...\"");
         mCheckSum.reset(nullptr);
         return false;
       }
 
-      if ((isRW) && mCheckSum->GetMaxOffset() &&
+      if ((mIsRW) && mCheckSum->GetMaxOffset() &&
           (mCheckSum->GetMaxOffset() < openSize)) {
         // If there was a write which was not extending the file the checksum
         // is dirty!
@@ -2892,7 +2914,7 @@ XrdFstOfsFile::VerifyChecksum()
       }
     } else {
       // This was prefect streaming I/O
-      if ((!isRW) && (mCheckSum->GetMaxOffset() != openSize)) {
+      if ((!mIsRW) && (mCheckSum->GetMaxOffset() != openSize)) {
         eos_info("info=\"skipping checksum (re-scan) since file was not read "
                  "completely %llu %llu...\"", mCheckSum->GetMaxOffset(), openSize);
         mCheckSum.reset(nullptr);
@@ -2900,7 +2922,7 @@ XrdFstOfsFile::VerifyChecksum()
       }
     }
 
-    if (isRW) {
+    if (mIsRW) {
       eos_info("(write) checksum type: %s checksum hex: %s requested-checksum hex: %s",
                mCheckSum->GetName(), mCheckSum->GetHexChecksum(),
                mOpenOpaque->Get("mgm.checksum") ? mOpenOpaque->Get("mgm.checksum") : "-none-");
@@ -3169,7 +3191,7 @@ XrdFstOfsFile::FilterTagsInPlace(std::string& opaque,
 time_t
 XrdFstOfsFile::GetMtime() const
 {
-  if (!isRW) {
+  if (!mIsRW) {
     // this is to report the MGM mtime to http get requests
     if (mForcedMtime != 1) {
       return mForcedMtime;

@@ -111,91 +111,6 @@ extern "C"
 EOSFSTNAMESPACE_BEGIN
 
 //------------------------------------------------------------------------------
-// Constructor
-//------------------------------------------------------------------------------
-XrdFstOfs::XrdFstOfs() :
-  eos::common::LogId(), mHostName(NULL), mMqOnQdb(false),
-  mHttpd(0),
-  Simulate_IO_read_error(false), Simulate_IO_write_error(false),
-  Simulate_XS_read_error(false), Simulate_XS_write_error(false),
-  Simulate_FMD_open_error(false)
-{
-  Eroute = 0;
-  Messaging = 0;
-  Storage = 0;
-  TransferScheduler = 0;
-  TpcMap.resize(2);
-  TpcMap[0].set_deleted_key(""); // readers
-  TpcMap[1].set_deleted_key(""); // writers
-
-  if (!getenv("EOS_NO_SHUTDOWN")) {
-    // Add shutdown handler
-    (void) signal(SIGINT, xrdfstofs_shutdown);
-    (void) signal(SIGTERM, xrdfstofs_shutdown);
-    (void) signal(SIGQUIT, xrdfstofs_shutdown);
-    // Add graceful shutdown handler
-    (void) signal(SIGUSR1, xrdfstofs_graceful_shutdown);
-  }
-
-  // Initialize the google sparse hash maps
-  gOFS.WNoDeleteOnCloseFid.clear_deleted_key();
-  gOFS.WNoDeleteOnCloseFid.set_deleted_key(0);
-
-  if (getenv("EOS_FST_CALL_MANAGER_XRD_POOL")) {
-    int max_size = 10;
-    const char* csize {nullptr};
-
-    if ((csize = getenv("EOS_FST_CALL_MANAGER_XRD_POOL_SIZE"))) {
-      try {
-        max_size = std::stoi(csize);
-
-        if (max_size < 1) {
-          max_size = 1;
-        }
-
-        if (max_size > 32) {
-          max_size = 32;
-        }
-      } catch (...) {
-        // ignore
-      }
-    }
-
-    mMgmXrdPool.reset(new eos::common::XrdConnPool(true, max_size));
-    fprintf(stderr, "Config Enabled CallManager xrootd connection pool with "
-            "size=%i\n", max_size);
-  }
-}
-
-//------------------------------------------------------------------------------
-// Destructor
-//------------------------------------------------------------------------------
-XrdFstOfs::~XrdFstOfs()
-{
-  if (mHttpd) {
-    delete mHttpd;
-  }
-}
-
-//------------------------------------------------------------------------------
-// Get a new OFS directory object - not implemented
-//-----------------------------------------------------------------------------
-XrdSfsDirectory*
-XrdFstOfs::newDir(char* user, int MonID)
-{
-  return (XrdSfsDirectory*)(0);
-}
-
-//------------------------------------------------------------------------------
-// Get a new OFS file object
-//-----------------------------------------------------------------------------
-XrdSfsFile*
-XrdFstOfs::newFile(char* user, int MonID)
-{
-  return static_cast<XrdSfsFile*>(new XrdFstOfsFile(user, MonID));
-}
-
-//------------------------------------------------------------------------------
 // Get stacktrace from crashing process
 //------------------------------------------------------------------------------
 void
@@ -359,6 +274,82 @@ XrdFstOfs::xrdfstofs_graceful_shutdown(int sig)
   (void) signal(SIGQUIT, SIG_IGN);
   (void) signal(SIGUSR1, SIG_IGN);
   kill(getpid(), 9);
+}
+
+//------------------------------------------------------------------------------
+// Constructor
+//------------------------------------------------------------------------------
+XrdFstOfs::XrdFstOfs() :
+  eos::common::LogId(), mHostName(NULL), mMqOnQdb(false),
+  mCloseThreadPool(8, 64, 5, 6, 5, "async_close"),
+  mMgmXrdPool(nullptr), mHttpd(nullptr),
+  Simulate_IO_read_error(false), Simulate_IO_write_error(false),
+  Simulate_XS_read_error(false), Simulate_XS_write_error(false),
+  Simulate_FMD_open_error(false)
+{
+  Eroute = 0;
+  Messaging = 0;
+  Storage = 0;
+  TransferScheduler = 0;
+  TpcMap.resize(2);
+  TpcMap[0].set_deleted_key(""); // readers
+  TpcMap[1].set_deleted_key(""); // writers
+
+  if (!getenv("EOS_NO_SHUTDOWN")) {
+    // Add shutdown handler
+    (void) signal(SIGINT, xrdfstofs_shutdown);
+    (void) signal(SIGTERM, xrdfstofs_shutdown);
+    (void) signal(SIGQUIT, xrdfstofs_shutdown);
+    // Add graceful shutdown handler
+    (void) signal(SIGUSR1, xrdfstofs_graceful_shutdown);
+  }
+
+  // Initialize the google sparse hash maps
+  gOFS.WNoDeleteOnCloseFid.clear_deleted_key();
+  gOFS.WNoDeleteOnCloseFid.set_deleted_key(0);
+
+  if (getenv("EOS_FST_CALL_MANAGER_XRD_POOL")) {
+    int max_size = 10;
+    const char* csize {nullptr};
+
+    if ((csize = getenv("EOS_FST_CALL_MANAGER_XRD_POOL_SIZE"))) {
+      try {
+        max_size = std::stoi(csize);
+
+        if (max_size < 1) {
+          max_size = 1;
+        }
+
+        if (max_size > 32) {
+          max_size = 32;
+        }
+      } catch (...) {
+        // ignore
+      }
+    }
+
+    mMgmXrdPool.reset(new eos::common::XrdConnPool(true, max_size));
+    fprintf(stderr, "Config Enabled CallManager xrootd connection pool with "
+            "size=%i\n", max_size);
+  }
+}
+
+//------------------------------------------------------------------------------
+// Get a new OFS directory object - not implemented
+//-----------------------------------------------------------------------------
+XrdSfsDirectory*
+XrdFstOfs::newDir(char* user, int MonID)
+{
+  return (XrdSfsDirectory*)(0);
+}
+
+//------------------------------------------------------------------------------
+// Get a new OFS file object
+//-----------------------------------------------------------------------------
+XrdSfsFile*
+XrdFstOfs::newFile(char* user, int MonID)
+{
+  return static_cast<XrdSfsFile*>(new XrdFstOfsFile(user, MonID));
 }
 
 //------------------------------------------------------------------------------
@@ -832,14 +823,15 @@ XrdFstOfs::Configure(XrdSysError& Eroute, XrdOucEnv* envP)
     mHttpdPort = strtol(getenv("EOS_FST_HTTP_PORT"), 0, 10);
   }
 
-  mHttpd = new HttpServer(mHttpdPort);
+  mHttpd.reset(new HttpServer(mHttpdPort));
 
   if (mHttpd) {
     mHttpd->Start();
   }
 
-  eos_notice("FST_HOST=%s FST_PORT=%ld FST_HTTP_PORT=%d VERSION=%s RELEASE=%s KEYTABADLER=%s",
-             mHostName, myPort, mHttpdPort, VERSION, RELEASE, kt_cks.c_str());
+  eos_notice("FST_HOST=%s FST_PORT=%ld FST_HTTP_PORT=%d VERSION=%s RELEASE=%s "
+             "KEYTABADLER=%s", mHostName, myPort, mHttpdPort, VERSION, RELEASE,
+             kt_cks.c_str());
   return 0;
 }
 
