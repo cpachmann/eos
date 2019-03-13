@@ -1006,7 +1006,6 @@ XrdFstOfsFile::_close()
   bool minimumsizeerror = false;
   bool consistencyerror = false;
   bool atomicoverlap = false;
-  std::this_thread::sleep_for(std::chrono::seconds(100));
 
   // Any close on a file opened in TPC mode invalidates tpc keys
   if (mTpcKey.length()) {
