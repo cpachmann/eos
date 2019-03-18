@@ -107,6 +107,9 @@ XrdMgmOfs* gOFS = 0;
 // Set the version information
 XrdVERSIONINFO(XrdSfsGetFileSystem, MgmOfs);
 
+// Forward declaration of gcov flush API
+extern "C" void __gcov_flush();
+
 //------------------------------------------------------------------------------
 //! Filesystem Plugin factory function
 //!
@@ -472,6 +475,7 @@ XrdMgmOfs::Disc(const XrdSecEntity* client)
 #include "XrdMgmOfs/Chksum.cc"
 #include "XrdMgmOfs/Chmod.cc"
 #include "XrdMgmOfs/Chown.cc"
+#include "XrdMgmOfs/Coverage.cc"
 #include "XrdMgmOfs/DeleteExternal.cc"
 #include "XrdMgmOfs/Exists.cc"
 #include "XrdMgmOfs/Find.cc"
