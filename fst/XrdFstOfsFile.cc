@@ -963,7 +963,7 @@ int
 XrdFstOfsFile::close()
 {
   // Close happening the in the same XRootD thread
-  if (viaDelete || mWrDelete || (mIsRW == false) ||
+  if (viaDelete || mWrDelete || mIsDevNull || (mIsRW == false) ||
       (mIsRW && mMaxOffsetWritten <= msMinSizeAsyncClose)) {
     return _close();
   }
@@ -972,20 +972,20 @@ XrdFstOfsFile::close()
   // callback (SFS_STARTED). This only happens for written files with size
   // bigger than msMinSizeAsyncClose (2GB).
   eos_info("msg=\"close delegated to async thread \" fid=%llu ns_path=\"%s\" "
-           "fs_path=\"%s\"", mFsId, mNsPath.c_str(), mFstPath.c_str());
+           "fs_path=\"%s\"", mFileId, mNsPath.c_str(), mFstPath.c_str());
   // Create a close callback and put the client in waiting mode
   mCloseCb.reset(new XrdOucCallBack());
   mCloseCb->Init(&error);
   error.setErrInfo(1800, "delay client up to 30 minutes");
   gOFS.mCloseThreadPool.PushTask<void>([&]() -> void {
-    eos_info("%s", "msg=\"doing close in the async thread\"");
+    eos_info("msg=\"doing close in the async thread\" fid=%llu", mFileId);
     int rc = _close();
     int reply_rc = mCloseCb->Reply(rc, (rc ? error.getErrInfo() : 0),
     (rc ? error.getErrText() : ""));
 
     if (reply_rc == 0)
     {
-      eos_err("msg=\"callback reply rc=%i\"", reply_rc);
+      eos_err("%s", "msg=\"callback reply failed\" fid=%llu", mFileId);
     }
   });
   return SFS_STARTED;
