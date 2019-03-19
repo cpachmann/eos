@@ -107,8 +107,10 @@ XrdMgmOfs* gOFS = 0;
 // Set the version information
 XrdVERSIONINFO(XrdSfsGetFileSystem, MgmOfs);
 
+#ifdef COVERAGE_BUILD
 // Forward declaration of gcov flush API
 extern "C" void __gcov_flush();
+#endif
 
 //------------------------------------------------------------------------------
 //! Filesystem Plugin factory function
